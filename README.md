@@ -5,7 +5,7 @@
 - `frontend/` — React + Vite + TypeScript SPA. Manual "Sign in with Microsoft" button using MSAL popup login.
 - `backend/` — ASP.NET Core Web API (net8.0, runs on Linux). Validates the Microsoft-issued access token on every request via `Microsoft.Identity.Web`.
 
-## Prerequisites (not yet installed on this machine)
+## Prerequisites
 
 - Node.js 20+ and npm
 - .NET SDK 8.0
