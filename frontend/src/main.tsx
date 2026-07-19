@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { PublicClientApplication, EventType } from "@azure/msal-browser";
 import { MsalProvider } from "@azure/msal-react";
 import { msalConfig } from "./authConfig";
+import { markSessionStarted } from "./session";
 import App from "./App";
 import "./index.css";
 
@@ -17,6 +18,9 @@ msalInstance.addEventCallback((event) => {
     const account = (event.payload as { account?: import("@azure/msal-browser").AccountInfo }).account;
     if (account) {
       msalInstance.setActiveAccount(account);
+      // Only an interactive login fires this event (unlike silent token
+      // refreshes), so this is the true start of the 1-hour session clock.
+      markSessionStarted();
     }
   }
 });
