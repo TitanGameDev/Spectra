@@ -1,4 +1,4 @@
-import type { Configuration } from "@azure/msal-browser";
+import { LogLevel, type Configuration } from "@azure/msal-browser";
 
 const tenantId = import.meta.env.VITE_MSAL_TENANT_ID;
 
@@ -9,13 +9,38 @@ export const msalConfig: Configuration = {
     redirectUri: import.meta.env.VITE_MSAL_REDIRECT_URI,
   },
   cache: {
+    // sessionStorage, not localStorage — tokens don't persist past the tab/browser
+    // session, and aren't shared across tabs, which limits exposure if the page
+    // is ever compromised via XSS.
     cacheLocation: "sessionStorage",
     storeAuthStateInCookie: false,
   },
+  system: {
+    loggerOptions: {
+      piiLoggingEnabled: false,
+      logLevel: LogLevel.Warning,
+      loggerCallback: (level, message) => {
+        if (level === LogLevel.Error || level === LogLevel.Warning) {
+          console.warn(message);
+        }
+      },
+    },
+  },
 };
 
-// Scope for the backend API. Requested up front so the popup login
-// also grants an access token we can attach to API calls.
+export const apiScopes = [import.meta.env.VITE_API_SCOPE];
+
+// Microsoft Graph, used only to fetch the signed-in user's profile photo.
+export const graphScopes = ["User.Read"];
+
+// Requested up front so the popup login grants consent for both resources
+// at once; each resource still gets its own access token via acquireTokenSilent.
 export const loginRequest = {
-  scopes: [import.meta.env.VITE_API_SCOPE],
+  scopes: [...apiScopes, ...graphScopes],
 };
+
+// Deliberately NOT in loginRequest — this is an elevated, tenant-wide read
+// permission only admins need (to search groups in Settings), so it's
+// requested on demand (incremental consent) rather than prompting every
+// user for it at sign-in.
+export const directoryScopes = ["Group.Read.All"];
