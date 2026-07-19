@@ -3,3 +3,6 @@ obj/
 .env
 .env.local
 *.local
+*.db
+*.db-shm
+*.db-wal
