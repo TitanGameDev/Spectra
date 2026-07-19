@@ -1,23 +1,27 @@
 import { AuthenticatedTemplate, UnauthenticatedTemplate } from "@azure/msal-react";
-import LoginButton from "./components/LoginButton";
-import Welcome from "./components/Welcome";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import LoginScreen from "./components/LoginScreen";
+import Dashboard from "./components/Dashboard";
+import Settings from "./components/Settings";
+import { UserProvider } from "./UserContext";
 
 export default function App() {
   return (
-    <main className="app-shell">
-      <div className="brand">
-        <div className="brand-mark" />
-        <h1>Spectra</h1>
-        <UnauthenticatedTemplate>
-          <p>Sign in to continue</p>
-        </UnauthenticatedTemplate>
-      </div>
+    <>
       <UnauthenticatedTemplate>
-        <LoginButton />
+        <LoginScreen />
       </UnauthenticatedTemplate>
       <AuthenticatedTemplate>
-        <Welcome />
+        <UserProvider>
+          <BrowserRouter>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
+            </Routes>
+          </BrowserRouter>
+        </UserProvider>
       </AuthenticatedTemplate>
-    </main>
+    </>
   );
 }
