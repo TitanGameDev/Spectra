@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Lets this net8.0 app run on the .NET 10 runtime installed on this dev machine.
+         Deploy target should still install the matching net8.0 ASP.NET Core runtime. -->
+    <RollForward>LatestMajor</RollForward>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Identity.Web" Version="4.13.2" />
+    <PackageReference Include="DotNetEnv" Version="3.1.1" />
+  </ItemGroup>
+
+</Project>
