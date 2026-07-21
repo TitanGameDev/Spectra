@@ -33,7 +33,14 @@ async function apiFetch<T>(instance: IPublicClientApplication, path: string, ini
     },
   });
   if (!response.ok) {
-    throw new Error(`API call failed: ${response.status} ${response.statusText}`);
+    let message = `API call failed: ${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      if (typeof body?.error === "string") message = body.error;
+    } catch {
+      // Response wasn't JSON — stick with the generic message.
+    }
+    throw new Error(message);
   }
   return response.json();
 }
@@ -72,6 +79,71 @@ export function updateSettings(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export interface Customer {
+  id: number;
+  name: string;
+  createdAt: string;
+  createdByEmail: string;
+}
+
+export function getCustomers(instance: IPublicClientApplication): Promise<Customer[]> {
+  return apiFetch<Customer[]>(instance, "/api/customers");
+}
+
+export function createCustomer(instance: IPublicClientApplication, name: string): Promise<Customer> {
+  return apiFetch<Customer>(instance, "/api/customers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export type DatabaseType = "sqlserver" | "mysql";
+
+export interface DatabaseStatus {
+  activeProvider: "sqlite" | "sqlserver" | "mysql";
+  configured: boolean;
+  databaseType: DatabaseType | null;
+  host: string | null;
+  port: number | null;
+  databaseName: string | null;
+  username: string | null;
+  isProvisioned: boolean;
+  updatedAt: string | null;
+  updatedByEmail: string | null;
+}
+
+export function getDatabaseStatus(instance: IPublicClientApplication): Promise<DatabaseStatus> {
+  return apiFetch<DatabaseStatus>(instance, "/api/settings/database");
+}
+
+export interface SaveDatabaseConnectionResult {
+  databaseType: DatabaseType;
+  host: string;
+  port: number;
+  databaseName: string;
+  username: string;
+  isProvisioned: boolean;
+  needsCreation: boolean;
+}
+
+export function saveDatabaseConnection(
+  instance: IPublicClientApplication,
+  body: { databaseType: DatabaseType; host: string; port: number; databaseName: string; username: string; password: string },
+): Promise<SaveDatabaseConnectionResult> {
+  return apiFetch<SaveDatabaseConnectionResult>(instance, "/api/settings/database", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function provisionDatabase(
+  instance: IPublicClientApplication,
+): Promise<{ success: boolean; activeProvider: string }> {
+  return apiFetch(instance, "/api/settings/database/provision", { method: "POST" });
 }
 
 // Object URL for the user's Microsoft profile photo, or null if they don't have one set
@@ -113,4 +185,36 @@ export async function searchGroups(instance: IPublicClientApplication, query: st
   }
   const data = await response.json();
   return (data.value ?? []) as GraphGroup[];
+}
+
+export interface DirectoryUser {
+  id: string;
+  displayName: string | null;
+  mail: string | null;
+  userPrincipalName: string;
+  jobTitle: string | null;
+  accountEnabled: boolean;
+}
+
+// Lists every user in the tenant. First call of a session triggers a one-time
+// consent popup for User.Read.All (see authConfig.ts). Graph paginates at up
+// to 999 results per page, so this follows @odata.nextLink until exhausted.
+export async function listUsers(instance: IPublicClientApplication): Promise<DirectoryUser[]> {
+  const token = await acquireToken(instance, directoryScopes);
+
+  const users: DirectoryUser[] = [];
+  let url: string | null =
+    `${GRAPH_BASE_URL}/users?$select=id,displayName,mail,userPrincipalName,jobTitle,accountEnabled&$top=999`;
+
+  while (url) {
+    const response: Response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) {
+      throw new Error(`Failed to list users: ${response.status} ${response.statusText}`);
+    }
+    const data = await response.json();
+    users.push(...((data.value ?? []) as DirectoryUser[]));
+    url = data["@odata.nextLink"] ?? null;
+  }
+
+  return users;
 }
