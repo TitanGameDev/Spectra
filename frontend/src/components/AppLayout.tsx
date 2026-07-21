@@ -4,6 +4,7 @@ import { NavLink, Outlet } from "react-router-dom";
 import { fetchProfilePhoto } from "../api";
 import { endLocalSession, getSessionRemainingMs } from "../session";
 import { useCurrentUser } from "../UserContext";
+import { useCustomer } from "../CustomerContext";
 
 const NAV_ITEMS = [
   { to: "/", label: "Overview", end: true },
@@ -17,6 +18,7 @@ export default function AppLayout() {
   const { instance, accounts } = useMsal();
   const account = accounts[0];
   const { me } = useCurrentUser();
+  const { customers, selectedCustomerId, setSelectedCustomerId, loading: customersLoading } = useCustomer();
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
 
   useEffect(() => {
@@ -69,6 +71,20 @@ export default function AppLayout() {
             <span>Spectra</span>
           </NavLink>
           <div className="dashboard-account">
+            {!customersLoading && customers.length > 0 && (
+              <select
+                className="customer-switcher"
+                value={selectedCustomerId ?? ""}
+                onChange={(e) => setSelectedCustomerId(e.target.value ? Number(e.target.value) : null)}
+                aria-label="Selected customer"
+              >
+                {customers.map((customer) => (
+                  <option key={customer.id} value={customer.id}>
+                    {customer.name}
+                  </option>
+                ))}
+              </select>
+            )}
             {me?.isAdmin && (
               <NavLink className="btn btn-ghost btn-sm" to="/settings">
                 Settings

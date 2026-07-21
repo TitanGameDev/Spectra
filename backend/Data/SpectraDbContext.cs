@@ -8,11 +8,16 @@ public class SpectraDbContext(DbContextOptions<SpectraDbContext> options) : DbCo
     public DbSet<AppSettings> Settings => Set<AppSettings>();
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<DatabaseConnectionConfig> DatabaseConnections => Set<DatabaseConnectionConfig>();
+    public DbSet<CustomerUser> CustomerUsers => Set<CustomerUser>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<AppUser>()
             .HasIndex(u => u.EntraObjectId)
+            .IsUnique();
+
+        modelBuilder.Entity<CustomerUser>()
+            .HasIndex(u => new { u.CustomerId, u.GraphUserId })
             .IsUnique();
     }
 }
