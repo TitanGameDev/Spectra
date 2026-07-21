@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.EntityFrameworkCore;
 using Spectra.Api.Data;
+using Spectra.Api.Services;
 
 namespace Spectra.Api.Auth;
 
@@ -15,7 +16,7 @@ namespace Spectra.Api.Auth;
 //      listing groups directly, which is out of scope for an MSP-internal
 //      tool of this size.
 // Also upserts the AppUser row so we always have an up-to-date name/email.
-public class SpectraClaimsTransformation(SpectraDbContext db) : IClaimsTransformation
+public class SpectraClaimsTransformation(SpectraDbContext db, DatabaseHealth databaseHealth) : IClaimsTransformation
 {
     private const string AdminClaimType = "spectra_admin";
 
@@ -42,34 +43,50 @@ public class SpectraClaimsTransformation(SpectraDbContext db) : IClaimsTransform
         var displayName = principal.FindFirstValue("name") ?? principal.Identity?.Name ?? "";
         var email = principal.FindFirstValue(ClaimTypes.Upn) ?? principal.FindFirstValue("preferred_username") ?? "";
 
-        var user = await db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == objectId);
-        if (user is null)
+        try
         {
-            var isFirstUserEver = !await db.Users.AnyAsync();
-            user = new AppUser
+            var user = await db.Users.SingleOrDefaultAsync(u => u.EntraObjectId == objectId);
+            if (user is null)
             {
-                EntraObjectId = objectId,
-                DisplayName = displayName,
-                Email = email,
-                IsBootstrapAdmin = isFirstUserEver,
-                FirstSeenAt = DateTimeOffset.UtcNow,
-            };
-            db.Users.Add(user);
-            await db.SaveChangesAsync();
+                var isFirstUserEver = !await db.Users.AnyAsync();
+                user = new AppUser
+                {
+                    EntraObjectId = objectId,
+                    DisplayName = displayName,
+                    Email = email,
+                    IsBootstrapAdmin = isFirstUserEver,
+                    FirstSeenAt = DateTimeOffset.UtcNow,
+                };
+                db.Users.Add(user);
+                await db.SaveChangesAsync();
+            }
+            else if (user.DisplayName != displayName || user.Email != email)
+            {
+                user.DisplayName = displayName;
+                user.Email = email;
+                await db.SaveChangesAsync();
+            }
+
+            var settings = await db.Settings.SingleOrDefaultAsync();
+            var tokenGroups = principal.FindAll("groups").Select(c => c.Value).ToHashSet();
+            var isAdmin = user.IsBootstrapAdmin
+                || (settings?.AdminGroupId is { } adminGroupId && tokenGroups.Contains(adminGroupId));
+
+            databaseHealth.MarkHealthy();
+            identity.AddClaim(new Claim(AdminClaimType, isAdmin ? "true" : "false"));
         }
-        else if (user.DisplayName != displayName || user.Email != email)
+        catch (Exception ex)
         {
-            user.DisplayName = displayName;
-            user.Email = email;
-            await db.SaveChangesAsync();
+            // The database is unreachable or missing its schema (dropped tables,
+            // wrong credentials, server down, etc). Don't let that crash the whole
+            // authentication pipeline — admin status genuinely can't be determined
+            // without the database, but every request still needs to get through
+            // so the frontend's database-setup screen (driven by /api/system/status)
+            // can actually be reached and used to fix it.
+            databaseHealth.MarkUnhealthy(ex.Message);
+            identity.AddClaim(new Claim(AdminClaimType, "false"));
         }
 
-        var settings = await db.Settings.SingleOrDefaultAsync();
-        var tokenGroups = principal.FindAll("groups").Select(c => c.Value).ToHashSet();
-        var isAdmin = user.IsBootstrapAdmin
-            || (settings?.AdminGroupId is { } adminGroupId && tokenGroups.Contains(adminGroupId));
-
-        identity.AddClaim(new Claim(AdminClaimType, isAdmin ? "true" : "false"));
         return principal;
     }
 }

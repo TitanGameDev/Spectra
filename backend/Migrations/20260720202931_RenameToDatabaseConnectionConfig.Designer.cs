@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Spectra.Api.Data;
 
@@ -10,9 +11,11 @@ using Spectra.Api.Data;
 namespace Spectra.Api.Migrations
 {
     [DbContext(typeof(SpectraDbContext))]
-    partial class SpectraDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260720202931_RenameToDatabaseConnectionConfig")]
+    partial class RenameToDatabaseConnectionConfig
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -78,9 +81,6 @@ namespace Spectra.Api.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
-                    b.Property<bool>("ConsentGranted")
-                        .HasColumnType("INTEGER");
-
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("TEXT");
 
@@ -88,84 +88,13 @@ namespace Spectra.Api.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("LastSyncError")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("LastSyncedAt")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("Name")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("TenantId")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.HasKey("Id");
 
                     b.ToTable("Customers");
-                });
-
-            modelBuilder.Entity("Spectra.Api.Data.CustomerUser", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<bool>("AccountEnabled")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<DateTimeOffset?>("CreatedDateTime")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int>("CustomerId")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Department")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("DisplayName")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("GraphUserId")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool?>("HasArchiveMailbox")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("JobTitle")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("LicensesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Mail")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int?>("MailboxItemCount")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("MailboxSizeBytes")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("OfficeLocation")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset>("SyncedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("UserPrincipalName")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("CustomerId", "GraphUserId")
-                        .IsUnique();
-
-                    b.ToTable("CustomerUsers");
                 });
 
             modelBuilder.Entity("Spectra.Api.Data.DatabaseConnectionConfig", b =>
