@@ -39,8 +39,8 @@ export const loginRequest = {
   scopes: [...apiScopes, ...graphScopes],
 };
 
-// Deliberately NOT in loginRequest — this is an elevated, tenant-wide read
-// permission only admins need (to search groups in Settings), so it's
-// requested on demand (incremental consent) rather than prompting every
-// user for it at sign-in.
-export const directoryScopes = ["Group.Read.All"];
+// Deliberately NOT in loginRequest — these are elevated, tenant-wide read
+// permissions (searching groups in Settings, listing users on the Users tab),
+// so they're requested on demand (incremental consent) rather than prompting
+// every user for them at sign-in.
+export const directoryScopes = ["Group.Read.All", "User.Read.All"];

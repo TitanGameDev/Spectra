@@ -33,13 +33,33 @@ async function apiFetch<T>(instance: IPublicClientApplication, path: string, ini
     },
   });
   if (!response.ok) {
-    throw new Error(`API call failed: ${response.status} ${response.statusText}`);
+    let message = `API call failed: ${response.status} ${response.statusText}`;
+    try {
+      const body = await response.json();
+      if (typeof body?.error === "string") message = body.error;
+    } catch {
+      // Response wasn't JSON — stick with the generic message.
+    }
+    throw new Error(message);
   }
   return response.json();
 }
 
 export function callApi<T>(instance: IPublicClientApplication, path: string): Promise<T> {
   return apiFetch<T>(instance, path);
+}
+
+export interface SystemStatus {
+  databaseHealthy: boolean;
+  databaseError: string | null;
+}
+
+export function getSystemStatus(instance: IPublicClientApplication): Promise<SystemStatus> {
+  return apiFetch<SystemStatus>(instance, "/api/system/status");
+}
+
+export function resetToSqlite(instance: IPublicClientApplication): Promise<{ activeProvider: string }> {
+  return apiFetch(instance, "/api/system/reset-to-sqlite", { method: "POST" });
 }
 
 export interface MeResponse {
@@ -72,6 +92,126 @@ export function updateSettings(
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export interface Customer {
+  id: number;
+  name: string;
+  tenantId: string;
+  consentGranted: boolean;
+  lastSyncedAt: string | null;
+  lastSyncError: string | null;
+  createdAt: string;
+  createdByEmail: string;
+}
+
+export function getCustomers(instance: IPublicClientApplication): Promise<Customer[]> {
+  return apiFetch<Customer[]>(instance, "/api/customers");
+}
+
+export function createCustomer(instance: IPublicClientApplication, name: string, tenantId: string): Promise<Customer> {
+  return apiFetch<Customer>(instance, "/api/customers", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name, tenantId }),
+  });
+}
+
+export function collectCustomerData(instance: IPublicClientApplication, customerId: number): Promise<Customer> {
+  return apiFetch<Customer>(instance, `/api/customers/${customerId}/collect`, { method: "POST" });
+}
+
+export function getConsentUrl(instance: IPublicClientApplication, customerId: number): Promise<{ consentUrl: string }> {
+  return apiFetch(instance, `/api/customers/${customerId}/consent-url`);
+}
+
+// Minimal per-customer shape for the customer switcher — every signed-in
+// user can see this, unlike the full admin Customers management list above.
+export interface CustomerSummary {
+  id: number;
+  name: string;
+}
+
+export function getCustomerSummaries(instance: IPublicClientApplication): Promise<CustomerSummary[]> {
+  return apiFetch<CustomerSummary[]>(instance, "/api/customers/summary");
+}
+
+export interface CustomerUserMailbox {
+  sizeBytes: number | null;
+  itemCount: number | null;
+  hasArchive: boolean | null;
+}
+
+export interface CustomerUserLicense {
+  skuId: string;
+  skuPartNumber: string;
+  displayName: string;
+}
+
+export interface CustomerUser {
+  id: number;
+  graphUserId: string;
+  displayName: string | null;
+  mail: string | null;
+  userPrincipalName: string;
+  jobTitle: string | null;
+  department: string | null;
+  officeLocation: string | null;
+  accountEnabled: boolean;
+  createdDateTime: string | null;
+  syncedAt: string;
+  mailbox: CustomerUserMailbox | null;
+  licenses: CustomerUserLicense[];
+}
+
+export function getCustomerUsers(instance: IPublicClientApplication, customerId: number): Promise<CustomerUser[]> {
+  return apiFetch<CustomerUser[]>(instance, `/api/customers/${customerId}/users`);
+}
+
+export type DatabaseType = "sqlserver" | "mysql";
+
+export interface DatabaseStatus {
+  activeProvider: "sqlite" | "sqlserver" | "mysql";
+  configured: boolean;
+  databaseType: DatabaseType | null;
+  host: string | null;
+  port: number | null;
+  databaseName: string | null;
+  username: string | null;
+  isProvisioned: boolean;
+  updatedAt: string | null;
+  updatedByEmail: string | null;
+}
+
+export function getDatabaseStatus(instance: IPublicClientApplication): Promise<DatabaseStatus> {
+  return apiFetch<DatabaseStatus>(instance, "/api/settings/database");
+}
+
+export interface SaveDatabaseConnectionResult {
+  databaseType: DatabaseType;
+  host: string;
+  port: number;
+  databaseName: string;
+  username: string;
+  isProvisioned: boolean;
+  needsCreation: boolean;
+}
+
+export function saveDatabaseConnection(
+  instance: IPublicClientApplication,
+  body: { databaseType: DatabaseType; host: string; port: number; databaseName: string; username: string; password: string },
+): Promise<SaveDatabaseConnectionResult> {
+  return apiFetch<SaveDatabaseConnectionResult>(instance, "/api/settings/database", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export function provisionDatabase(
+  instance: IPublicClientApplication,
+): Promise<{ success: boolean; activeProvider: string }> {
+  return apiFetch(instance, "/api/settings/database/provision", { method: "POST" });
 }
 
 // Object URL for the user's Microsoft profile photo, or null if they don't have one set
@@ -113,4 +253,36 @@ export async function searchGroups(instance: IPublicClientApplication, query: st
   }
   const data = await response.json();
   return (data.value ?? []) as GraphGroup[];
+}
+
+export interface DirectoryUser {
+  id: string;
+  displayName: string | null;
+  mail: string | null;
+  userPrincipalName: string;
+  jobTitle: string | null;
+  accountEnabled: boolean;
+}
+
+// Lists every user in the tenant. First call of a session triggers a one-time
+// consent popup for User.Read.All (see authConfig.ts). Graph paginates at up
+// to 999 results per page, so this follows @odata.nextLink until exhausted.
+export async function listUsers(instance: IPublicClientApplication): Promise<DirectoryUser[]> {
+  const token = await acquireToken(instance, directoryScopes);
+
+  const users: DirectoryUser[] = [];
+  let url: string | null =
+    `${GRAPH_BASE_URL}/users?$select=id,displayName,mail,userPrincipalName,jobTitle,accountEnabled&$top=999`;
+
+  while (url) {
+    const response: Response = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!response.ok) {
+      throw new Error(`Failed to list users: ${response.status} ${response.statusText}`);
+    }
+    const data = await response.json();
+    users.push(...((data.value ?? []) as DirectoryUser[]));
+    url = data["@odata.nextLink"] ?? null;
+  }
+
+  return users;
 }

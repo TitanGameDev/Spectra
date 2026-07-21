@@ -1,26 +1,20 @@
 import { AuthenticatedTemplate, UnauthenticatedTemplate } from "@azure/msal-react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import LoginScreen from "./components/LoginScreen";
-import Dashboard from "./components/Dashboard";
-import Settings from "./components/Settings";
-import { UserProvider } from "./UserContext";
+import AuthenticatedApp from "./components/AuthenticatedApp";
+import ConsentCallback, { isConsentCallback } from "./components/ConsentCallback";
 
 export default function App() {
+  if (isConsentCallback()) {
+    return <ConsentCallback />;
+  }
+
   return (
     <>
       <UnauthenticatedTemplate>
         <LoginScreen />
       </UnauthenticatedTemplate>
       <AuthenticatedTemplate>
-        <UserProvider>
-          <BrowserRouter>
-            <Routes>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/settings" element={<Settings />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Routes>
-          </BrowserRouter>
-        </UserProvider>
+        <AuthenticatedApp />
       </AuthenticatedTemplate>
     </>
   );

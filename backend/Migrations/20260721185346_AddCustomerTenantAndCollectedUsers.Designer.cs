@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Spectra.Api.Data;
 
@@ -10,9 +11,11 @@ using Spectra.Api.Data;
 namespace Spectra.Api.Migrations
 {
     [DbContext(typeof(SpectraDbContext))]
-    partial class SpectraDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260721185346_AddCustomerTenantAndCollectedUsers")]
+    partial class AddCustomerTenantAndCollectedUsers
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -116,14 +119,8 @@ namespace Spectra.Api.Migrations
                     b.Property<bool>("AccountEnabled")
                         .HasColumnType("INTEGER");
 
-                    b.Property<DateTimeOffset?>("CreatedDateTime")
-                        .HasColumnType("TEXT");
-
                     b.Property<int>("CustomerId")
                         .HasColumnType("INTEGER");
-
-                    b.Property<string>("Department")
-                        .HasColumnType("TEXT");
 
                     b.Property<string>("DisplayName")
                         .HasColumnType("TEXT");
@@ -132,25 +129,10 @@ namespace Spectra.Api.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<bool?>("HasArchiveMailbox")
-                        .HasColumnType("INTEGER");
-
                     b.Property<string>("JobTitle")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("LicensesJson")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("Mail")
-                        .HasColumnType("TEXT");
-
-                    b.Property<int?>("MailboxItemCount")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<long?>("MailboxSizeBytes")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("OfficeLocation")
                         .HasColumnType("TEXT");
 
                     b.Property<DateTimeOffset>("SyncedAt")

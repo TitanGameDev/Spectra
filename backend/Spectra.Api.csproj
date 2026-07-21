@@ -4,7 +4,10 @@
     <TargetFramework>net8.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Microsoft.Data.SqlClient (needed for the SQL Server integration) refuses to
+         run at all under invariant globalization mode — it relies on ICU for
+         collation-aware operations. Slightly larger deployment, but required. -->
+    <InvariantGlobalization>false</InvariantGlobalization>
     <!-- Lets this net8.0 app run on the .NET 10 runtime installed on this dev machine.
          Deploy target should still install the matching net8.0 ASP.NET Core runtime. -->
     <RollForward>LatestMajor</RollForward>
@@ -14,6 +17,9 @@
     <PackageReference Include="Microsoft.Identity.Web" Version="4.13.2" />
     <PackageReference Include="DotNetEnv" Version="3.1.1" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="8.0.29" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.29" />
+    <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="8.0.3" />
+    <PackageReference Include="MySqlConnector" Version="2.6.1" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="8.0.29">
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
