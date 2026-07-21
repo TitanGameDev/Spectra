@@ -7,6 +7,8 @@ import {
   searchGroups,
   getCustomers,
   createCustomer,
+  collectCustomerData,
+  getConsentUrl,
   getDatabaseStatus,
   saveDatabaseConnection,
   provisionDatabase,
@@ -20,6 +22,7 @@ import {
 const DEFAULT_PORTS: Record<DatabaseType, string> = { sqlserver: "1433", mysql: "3306" };
 const DATABASE_LABELS: Record<DatabaseType, string> = { sqlserver: "SQL Server", mysql: "MySQL" };
 import { useCurrentUser } from "../UserContext";
+import { CONSENT_MESSAGE_TYPE } from "./ConsentCallback";
 
 export default function Settings() {
   const { instance } = useMsal();
@@ -41,8 +44,12 @@ export default function Settings() {
   const [customersError, setCustomersError] = useState<string | null>(null);
   const [showAddCustomer, setShowAddCustomer] = useState(false);
   const [newCustomerName, setNewCustomerName] = useState("");
+  const [newCustomerTenantId, setNewCustomerTenantId] = useState("");
   const [addingCustomer, setAddingCustomer] = useState(false);
   const [addCustomerError, setAddCustomerError] = useState<string | null>(null);
+  const [collectingId, setCollectingId] = useState<number | null>(null);
+  const [collectError, setCollectError] = useState<string | null>(null);
+  const [consentError, setConsentError] = useState<string | null>(null);
 
   const [dbStatus, setDbStatus] = useState<DatabaseStatus | null>(null);
   const [dbStatusError, setDbStatusError] = useState<string | null>(null);
@@ -141,14 +148,16 @@ export default function Settings() {
   const handleAddCustomer = async (e: FormEvent) => {
     e.preventDefault();
     const name = newCustomerName.trim();
-    if (!name) return;
+    const tenantId = newCustomerTenantId.trim();
+    if (!name || !tenantId) return;
 
     setAddingCustomer(true);
     setAddCustomerError(null);
     try {
-      const created = await createCustomer(instance, name);
+      const created = await createCustomer(instance, name, tenantId);
       setCustomers((prev) => [...prev, created].sort((a, b) => a.name.localeCompare(b.name)));
       setNewCustomerName("");
+      setNewCustomerTenantId("");
       setShowAddCustomer(false);
     } catch (err) {
       setAddCustomerError(err instanceof Error ? err.message : "Failed to add customer");
@@ -156,6 +165,58 @@ export default function Settings() {
       setAddingCustomer(false);
     }
   };
+
+  const handleCollect = async (customerId: number) => {
+    setCollectingId(customerId);
+    setCollectError(null);
+    try {
+      const updated = await collectCustomerData(instance, customerId);
+      setCustomers((prev) => prev.map((c) => (c.id === customerId ? updated : c)));
+    } catch (err) {
+      setCollectError(err instanceof Error ? err.message : "Failed to collect data");
+    } finally {
+      setCollectingId(null);
+    }
+  };
+
+  const handleGrantConsent = async (customerId: number) => {
+    setConsentError(null);
+    try {
+      const { consentUrl } = await getConsentUrl(instance, customerId);
+      // Deliberately no "noopener" here — ConsentCallback.tsx needs
+      // window.opener to report the outcome back once Entra redirects this
+      // popup. The target is always login.microsoftonline.com, a trusted
+      // first-party origin, so keeping the opener link is safe.
+      window.open(consentUrl, "_blank");
+    } catch (err) {
+      setConsentError(err instanceof Error ? err.message : "Failed to build the consent link");
+    }
+  };
+
+  // The consent tab (opened above) reports back here once Entra redirects it,
+  // then closes itself — this is what lets Settings pick up a granted consent
+  // and immediately retry collection without the admin doing anything else.
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin || event.data?.type !== CONSENT_MESSAGE_TYPE) {
+        return;
+      }
+      const { customerId, success, error } = event.data as {
+        customerId: number | null;
+        success: boolean;
+        error: string | null;
+      };
+      if (!customerId) return;
+      if (success) {
+        handleCollect(customerId);
+      } else {
+        setConsentError(error ?? "Consent was not granted.");
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [instance]);
 
   const handleSaveDatabase = async (e: FormEvent) => {
     e.preventDefault();
@@ -285,7 +346,10 @@ export default function Settings() {
             </button>
           )}
         </div>
-        <p className="settings-hint">The customers this tool manages.</p>
+        <p className="settings-hint">
+          Adding a customer collects their Entra ID users immediately via app-only Graph access. Their tenant admin
+          must grant consent to Spectra's app registration first — use "Grant consent" below if a collection fails.
+        </p>
 
         {customersError && <p className="login-error">{customersError}</p>}
 
@@ -299,8 +363,19 @@ export default function Settings() {
               onChange={(e) => setNewCustomerName(e.target.value)}
               autoFocus
             />
+            <input
+              type="text"
+              className="text-input"
+              placeholder="Entra tenant ID (GUID)…"
+              value={newCustomerTenantId}
+              onChange={(e) => setNewCustomerTenantId(e.target.value)}
+            />
             <div className="settings-actions">
-              <button type="submit" className="btn btn-primary" disabled={addingCustomer || !newCustomerName.trim()}>
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={addingCustomer || !newCustomerName.trim() || !newCustomerTenantId.trim()}
+              >
                 {addingCustomer ? "Adding…" : "Add"}
               </button>
               <button
@@ -309,6 +384,7 @@ export default function Settings() {
                 onClick={() => {
                   setShowAddCustomer(false);
                   setNewCustomerName("");
+                  setNewCustomerTenantId("");
                   setAddCustomerError(null);
                 }}
               >
@@ -319,12 +395,40 @@ export default function Settings() {
           </form>
         )}
 
+        {collectError && <p className="login-error">{collectError}</p>}
+        {consentError && <p className="login-error">{consentError}</p>}
+
         {customers.length > 0 ? (
           <ul className="customer-list">
             {customers.map((customer) => (
-              <li key={customer.id} className="customer-list-item">
-                <span>{customer.name}</span>
-                <span className="fine-print">Added {new Date(customer.createdAt).toLocaleDateString()}</span>
+              <li key={customer.id} className="customer-list-item customer-list-item-detailed">
+                <div>
+                  <span>{customer.name}</span>
+                  <p className="fine-print">
+                    Tenant {customer.tenantId} — added {new Date(customer.createdAt).toLocaleDateString()}
+                  </p>
+                  <p className="fine-print">
+                    <span
+                      className={`status-dot status-dot-${customer.consentGranted ? "connected" : "error"}`}
+                      aria-hidden="true"
+                    />
+                    {customer.consentGranted ? "Consent granted" : "Consent not granted"}
+                    {customer.lastSyncedAt && ` — last synced ${new Date(customer.lastSyncedAt).toLocaleString()}`}
+                  </p>
+                  {customer.lastSyncError && <p className="login-error">{customer.lastSyncError}</p>}
+                </div>
+                <div className="settings-actions">
+                  <button className="btn btn-ghost btn-sm" onClick={() => handleGrantConsent(customer.id)}>
+                    Grant consent
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => handleCollect(customer.id)}
+                    disabled={collectingId === customer.id}
+                  >
+                    {collectingId === customer.id ? "Collecting…" : "Collect data"}
+                  </button>
+                </div>
               </li>
             ))}
           </ul>

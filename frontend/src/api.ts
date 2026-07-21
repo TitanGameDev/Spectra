@@ -49,6 +49,19 @@ export function callApi<T>(instance: IPublicClientApplication, path: string): Pr
   return apiFetch<T>(instance, path);
 }
 
+export interface SystemStatus {
+  databaseHealthy: boolean;
+  databaseError: string | null;
+}
+
+export function getSystemStatus(instance: IPublicClientApplication): Promise<SystemStatus> {
+  return apiFetch<SystemStatus>(instance, "/api/system/status");
+}
+
+export function resetToSqlite(instance: IPublicClientApplication): Promise<{ activeProvider: string }> {
+  return apiFetch(instance, "/api/system/reset-to-sqlite", { method: "POST" });
+}
+
 export interface MeResponse {
   name: string | null;
   email: string | null;
@@ -84,6 +97,10 @@ export function updateSettings(
 export interface Customer {
   id: number;
   name: string;
+  tenantId: string;
+  consentGranted: boolean;
+  lastSyncedAt: string | null;
+  lastSyncError: string | null;
   createdAt: string;
   createdByEmail: string;
 }
@@ -92,12 +109,63 @@ export function getCustomers(instance: IPublicClientApplication): Promise<Custom
   return apiFetch<Customer[]>(instance, "/api/customers");
 }
 
-export function createCustomer(instance: IPublicClientApplication, name: string): Promise<Customer> {
+export function createCustomer(instance: IPublicClientApplication, name: string, tenantId: string): Promise<Customer> {
   return apiFetch<Customer>(instance, "/api/customers", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, tenantId }),
   });
+}
+
+export function collectCustomerData(instance: IPublicClientApplication, customerId: number): Promise<Customer> {
+  return apiFetch<Customer>(instance, `/api/customers/${customerId}/collect`, { method: "POST" });
+}
+
+export function getConsentUrl(instance: IPublicClientApplication, customerId: number): Promise<{ consentUrl: string }> {
+  return apiFetch(instance, `/api/customers/${customerId}/consent-url`);
+}
+
+// Minimal per-customer shape for the customer switcher — every signed-in
+// user can see this, unlike the full admin Customers management list above.
+export interface CustomerSummary {
+  id: number;
+  name: string;
+}
+
+export function getCustomerSummaries(instance: IPublicClientApplication): Promise<CustomerSummary[]> {
+  return apiFetch<CustomerSummary[]>(instance, "/api/customers/summary");
+}
+
+export interface CustomerUserMailbox {
+  sizeBytes: number | null;
+  itemCount: number | null;
+  hasArchive: boolean | null;
+}
+
+export interface CustomerUserLicense {
+  skuId: string;
+  skuPartNumber: string;
+  displayName: string;
+}
+
+export interface CustomerUser {
+  id: number;
+  graphUserId: string;
+  displayName: string | null;
+  mail: string | null;
+  userPrincipalName: string;
+  jobTitle: string | null;
+  department: string | null;
+  officeLocation: string | null;
+  accountEnabled: boolean;
+  createdDateTime: string | null;
+  syncedAt: string;
+  mailbox: CustomerUserMailbox | null;
+  licenses: CustomerUserLicense[];
+}
+
+export function getCustomerUsers(instance: IPublicClientApplication, customerId: number): Promise<CustomerUser[]> {
+  return apiFetch<CustomerUser[]>(instance, `/api/customers/${customerId}/users`);
 }
 
 export type DatabaseType = "sqlserver" | "mysql";
