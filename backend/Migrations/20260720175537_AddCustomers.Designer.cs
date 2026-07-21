@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Spectra.Api.Data;
 
@@ -10,9 +11,11 @@ using Spectra.Api.Data;
 namespace Spectra.Api.Migrations
 {
     [DbContext(typeof(SpectraDbContext))]
-    partial class SpectraDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260720175537_AddCustomers")]
+    partial class AddCustomers
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -92,50 +95,6 @@ namespace Spectra.Api.Migrations
                     b.HasKey("Id");
 
                     b.ToTable("Customers");
-                });
-
-            modelBuilder.Entity("Spectra.Api.Data.DatabaseConnectionConfig", b =>
-                {
-                    b.Property<int>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("DatabaseName")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("DatabaseType")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("EncryptedPassword")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Host")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("IsProvisioned")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<int>("Port")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<DateTimeOffset>("UpdatedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("UpdatedByEmail")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Username")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.ToTable("DatabaseConnections");
                 });
 #pragma warning restore 612, 618
         }

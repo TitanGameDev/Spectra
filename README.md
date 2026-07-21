@@ -34,7 +34,7 @@ Spectra has two ways someone becomes an admin (able to see **Settings** and conf
 
    > Caveat: if a user belongs to 200+ groups, Azure AD omits the groups list from the token entirely (an "overage" indicator instead). Not handled here — unlikely to matter for an MSP-internal tool, but worth knowing.
 
-The searchable group picker in Settings calls Microsoft Graph directly from the browser and needs the `Group.Read.All` delegated permission on the **frontend** App Registration. This is requested on demand (only when an admin opens Settings and searches — not at every sign-in) and needs admin consent: **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated** → `Group.Read.All` → **Grant admin consent for \<your tenant\>**.
+The searchable group picker in Settings, and the **Users** tab (lists every user in the tenant via Graph), both call Microsoft Graph directly from the browser and need delegated permissions on the **frontend** App Registration: `Group.Read.All` and `User.Read.All`. Both are requested on demand (only when Settings' group search or the Users tab is actually used — not at every sign-in) and need admin consent: **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated** → add both → **Grant admin consent for \<your tenant\>**.
 
 ## Configure
 
@@ -64,7 +64,24 @@ Open `http://localhost:5173`, click **Sign in with Microsoft** — this opens a 
 ## Notes
 
 - The backend is plain ASP.NET Core on Linux, so it can shell out to your PowerShell (`pwsh`) scripts via `System.Diagnostics.Process` when that work starts — not wired up yet, this first pass is just the login screen.
-- The backend uses a SQLite database (`backend/spectra.db`, gitignored) for users and the admin group setting. Migrations apply automatically on startup — nothing to run by hand. If you change the data model later, generate a new migration with `dotnet ef migrations add <Name>` (needs the `dotnet-ef` tool: `dotnet tool install --global dotnet-ef`).
+- `InvariantGlobalization` is disabled (`Spectra.Api.csproj`) — `Microsoft.Data.SqlClient`, needed for the SQL Server integration, refuses to run at all under invariant mode (it relies on ICU for collation-aware operations). This makes the published app somewhat larger; not worth reverting unless the external-database feature is dropped entirely.
+- The backend uses a SQLite database (`backend/spectra.db`, gitignored) by default for users, settings, and customers. Migrations apply automatically on startup — nothing to run by hand. If you change the data model later, generate a new migration with `dotnet ef migrations add <Name>` (needs the `dotnet-ef` tool: `dotnet tool install --global dotnet-ef`). See **Database (SQL Server / MySQL)** below for moving off SQLite.
+
+## Database (SQL Server / MySQL)
+
+Settings → **Database** (admin-only) lets you connect a real SQL Server or MySQL instance and cut Spectra over to it, live, with no restart required.
+
+**How it works**: admins pick a database type, then enter host, port, database name, username/password. Saving tests the connection and checks whether the named database exists. If it doesn't, Settings offers to create it — declining just leaves the saved connection sitting there with a **Create Database** button, so you can come back and finish the cutover whenever you're ready. When you do create it, the backend builds the schema, copies every existing user (including whoever is currently the bootstrap admin — this matters, otherwise the person doing the cutover could lock themselves out), the admin group setting, and all customers into the new database, then flips Spectra over to it for the very next request.
+
+**Mechanics worth knowing**:
+- The hot-swap works because the backend's EF Core registration reads a singleton "which database is active" service on every request rather than fixing a connection string at startup. That state is also written to a local file (`backend/database-provider.json`, gitignored) so a later restart — for any reason — comes back up on the same database instead of reverting to SQLite.
+- The stored password is encrypted at rest via ASP.NET Core Data Protection (keys persisted to `backend/keys/`, also gitignored) and is never sent back to the frontend after saving.
+- Authentication is username/password only (SQL Login for SQL Server, standard MySQL auth) — no Windows/Entra auth or MySQL socket auth.
+- The form defaults the port per engine (1433 for SQL Server, 3306 for MySQL) specifically to avoid pointing the wrong client at the wrong port — the two protocols are completely incompatible, and the failure mode isn't obvious (SQL Server's `Microsoft.Data.SqlClient` doesn't error cleanly against a MySQL endpoint or vice versa; it manifests as a fairly opaque low-level connection/protocol error).
+- SQL Server's connection defaults to `TrustServerCertificate=true`, convenient for self-signed/dev instances but skipping certificate validation — fine for a trusted internal network, worth tightening if the server is reachable more broadly.
+- Schema creation on the external database uses EF Core's `EnsureCreated()`, not the migration history SQLite uses — simpler for a first cutover, but it means future model changes won't auto-migrate an external-database-backed install the way `dotnet ef migrations add` + restart does for SQLite. Revisit this if the schema needs to evolve after go-live.
+- If the target database name already exists on the server but wasn't created by a prior Spectra provisioning run (i.e. it has unrelated tables), `EnsureCreated()` will not add Spectra's tables to it — point at an empty/dedicated database name instead.
+- MySQL support uses `Pomelo.EntityFrameworkCore.MySql` + `MySqlConnector`; SQL Server uses `Microsoft.Data.SqlClient` directly for connection testing/creation, independent of EF Core, since the target database might not exist yet when that check runs.
 
 ## Production hardening
 

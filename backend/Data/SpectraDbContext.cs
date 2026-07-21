@@ -6,6 +6,8 @@ public class SpectraDbContext(DbContextOptions<SpectraDbContext> options) : DbCo
 {
     public DbSet<AppUser> Users => Set<AppUser>();
     public DbSet<AppSettings> Settings => Set<AppSettings>();
+    public DbSet<Customer> Customers => Set<Customer>();
+    public DbSet<DatabaseConnectionConfig> DatabaseConnections => Set<DatabaseConnectionConfig>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
