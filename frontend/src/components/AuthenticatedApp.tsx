@@ -5,12 +5,13 @@ import { getSystemStatus, type SystemStatus } from "../api";
 import AppLayout from "./AppLayout";
 import Overview from "./Overview";
 import Users from "./Users";
+import Security from "./Security";
 import PlaceholderPage from "./PlaceholderPage";
 import Settings from "./Settings";
 import DatabaseSetupScreen from "./DatabaseSetupScreen";
 import { UserProvider } from "../UserContext";
 import { CustomerProvider } from "../CustomerContext";
-import { AzureIcon, IntuneIcon, SecurityIcon } from "../icons";
+import { AzureIcon, IntuneIcon } from "../icons";
 
 export default function AuthenticatedApp() {
   const { instance } = useMsal();
@@ -43,16 +44,7 @@ export default function AuthenticatedApp() {
             <Route element={<AppLayout />}>
               <Route path="/" element={<Overview />} />
               <Route path="/users" element={<Users />} />
-              <Route
-                path="/security"
-                element={
-                  <PlaceholderPage
-                    title="Security"
-                    tagline="Alerts and posture across your environment."
-                    icon={SecurityIcon}
-                  />
-                }
-              />
+              <Route path="/security" element={<Security />} />
               <Route
                 path="/intune"
                 element={

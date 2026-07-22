@@ -34,5 +34,23 @@ public class CustomerUser
     // licenses and nothing here needs to be queried/filtered by SKU yet.
     public string? LicensesJson { get; set; }
 
+    // {IsMfaRegistered, IsMfaCapable, Methods: string[]} from the Reports API
+    // (reuses Reports.Read.All, no separate permission). Null when never
+    // collected/permission missing, same convention as the mailbox fields.
+    public string? MfaJson { get; set; }
+
+    // Array of {Name, Enabled, ForwardsTo} — just the inbox rules that
+    // auto-forward or redirect mail, the classic BEC/phishing persistence
+    // indicator. Derived from InboxRulesJson below at collection time so the
+    // Security tab's flagged view doesn't need to re-filter on every read.
+    // Needs MailboxSettings.Read. Empty array (not null) means "checked, found none".
+    public string? ForwardingRulesJson { get; set; }
+
+    // Array of {Name, Enabled, Sequence, ConditionTypes, ActionTypes,
+    // ForwardsTo} — every inbox rule, not just forwarding ones. Same
+    // MailboxSettings.Read permission and Graph call as ForwardingRulesJson;
+    // that field is just a filtered view of this one.
+    public string? InboxRulesJson { get; set; }
+
     public DateTimeOffset SyncedAt { get; set; }
 }

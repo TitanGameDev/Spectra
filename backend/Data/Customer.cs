@@ -18,6 +18,14 @@ public class Customer
     public DateTimeOffset? LastSyncedAt { get; set; }
     public string? LastSyncError { get; set; }
 
+    // Tenant-wide security data (not per-user) — JSON blobs rather than
+    // related tables for the same reason as CustomerUser.LicensesJson:
+    // nothing here needs to be queried/filtered server-side yet.
+    // {CurrentScore, MaxScore, CreatedDateTime} or null if never collected/permission missing.
+    public string? SecureScoreJson { get; set; }
+    // Array of {DisplayName, State} or null if never collected/permission missing.
+    public string? ConditionalAccessPoliciesJson { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
     public required string CreatedByEmail { get; set; }
 }

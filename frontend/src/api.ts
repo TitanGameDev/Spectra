@@ -148,6 +148,27 @@ export interface CustomerUserLicense {
   displayName: string;
 }
 
+export interface CustomerUserMfa {
+  isMfaRegistered: boolean;
+  isMfaCapable: boolean;
+  methods: string[];
+}
+
+export interface CustomerUserForwardingRule {
+  name: string;
+  enabled: boolean;
+  forwardsTo: string[];
+}
+
+export interface CustomerUserInboxRule {
+  name: string;
+  enabled: boolean;
+  sequence: number;
+  conditionTypes: string[];
+  actionTypes: string[];
+  forwardsTo: string[];
+}
+
 export interface CustomerUser {
   id: number;
   graphUserId: string;
@@ -162,10 +183,40 @@ export interface CustomerUser {
   syncedAt: string;
   mailbox: CustomerUserMailbox | null;
   licenses: CustomerUserLicense[];
+  mfa: CustomerUserMfa | null;
+  forwardingRules: CustomerUserForwardingRule[];
+  inboxRules: CustomerUserInboxRule[];
 }
 
 export function getCustomerUsers(instance: IPublicClientApplication, customerId: number): Promise<CustomerUser[]> {
   return apiFetch<CustomerUser[]>(instance, `/api/customers/${customerId}/users`);
+}
+
+export interface ConditionalAccessPolicy {
+  displayName: string;
+  state: string;
+  createdDateTime: string | null;
+  modifiedDateTime: string | null;
+  includeUsers: string[];
+  excludeUsers: string[];
+  includeGroups: string[];
+  excludeGroups: string[];
+  includeRoles: string[];
+  excludeRoles: string[];
+  includeApplications: string[];
+  excludeApplications: string[];
+  clientAppTypes: string[];
+  grantControlsOperator: string | null;
+  builtInControls: string[];
+}
+
+export interface CustomerSecurityInfo {
+  secureScore: { currentScore: number; maxScore: number; createdDateTime: string | null } | null;
+  conditionalAccessPolicies: ConditionalAccessPolicy[];
+}
+
+export function getCustomerSecurity(instance: IPublicClientApplication, customerId: number): Promise<CustomerSecurityInfo> {
+  return apiFetch<CustomerSecurityInfo>(instance, `/api/customers/${customerId}/security`);
 }
 
 export type DatabaseType = "sqlserver" | "mysql";
