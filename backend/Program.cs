@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Security.Claims;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -112,6 +113,16 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
+
+// Guards CollectCustomerDataAsync per customer — it deletes and re-inserts
+// that customer's CustomerUsers rows, which isn't safe to run concurrently
+// (two overlapping collections race on the same delete, and the second one's
+// DELETE affects 0 rows since the first already removed them, throwing
+// DbUpdateConcurrencyException). This can genuinely happen: adding a customer
+// triggers an immediate collection, and if the admin clicks Grant consent
+// and it completes quickly, the consent-callback tab's auto-collect (see
+// Settings.tsx) can land while that first one is still in flight.
+var collectionLocks = new ConcurrentDictionary<int, SemaphoreSlim>();
 
 using (var scope = app.Services.CreateScope())
 {
@@ -340,8 +351,50 @@ app.MapGet("/api/customers/{id:int}/users", async (int id, SpectraDbContext db) 
             ? null
             : new { SizeBytes = u.MailboxSizeBytes, ItemCount = u.MailboxItemCount, HasArchive = u.HasArchiveMailbox },
         Licenses = DeserializeLicenses(u.LicensesJson),
+        Mfa = DeserializeMfa(u.MfaJson),
+        ForwardingRules = DeserializeForwardingRules(u.ForwardingRulesJson),
+        InboxRules = DeserializeInboxRules(u.InboxRulesJson),
     }));
 }).RequireAuthorization();
+
+app.MapGet("/api/customers/{id:int}/security", async (int id, SpectraDbContext db) =>
+{
+    var customer = await db.Customers.FindAsync(id);
+    if (customer is null)
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Ok(new
+    {
+        SecureScore = string.IsNullOrEmpty(customer.SecureScoreJson)
+            ? null
+            : JsonSerializer.Deserialize<GraphSecureScoreDto>(customer.SecureScoreJson),
+        ConditionalAccessPolicies = string.IsNullOrEmpty(customer.ConditionalAccessPoliciesJson)
+            ? []
+            : (JsonSerializer.Deserialize<List<GraphConditionalAccessPolicyDto>>(customer.ConditionalAccessPoliciesJson) ?? [])
+                .Select(NormalizeCaPolicy),
+    });
+}).RequireAuthorization();
+
+// A customer whose data was last collected before the CA policy detail
+// fields existed has stored JSON missing them, which deserializes those
+// list properties as null — coerce to [] so the API's contract (and the
+// frontend's non-nullable array types) always holds, regardless of when the
+// stored data was collected.
+static GraphConditionalAccessPolicyDto NormalizeCaPolicy(GraphConditionalAccessPolicyDto p) => p with
+{
+    IncludeUsers = p.IncludeUsers ?? [],
+    ExcludeUsers = p.ExcludeUsers ?? [],
+    IncludeGroups = p.IncludeGroups ?? [],
+    ExcludeGroups = p.ExcludeGroups ?? [],
+    IncludeRoles = p.IncludeRoles ?? [],
+    ExcludeRoles = p.ExcludeRoles ?? [],
+    IncludeApplications = p.IncludeApplications ?? [],
+    ExcludeApplications = p.ExcludeApplications ?? [],
+    ClientAppTypes = p.ClientAppTypes ?? [],
+    BuiltInControls = p.BuiltInControls ?? [],
+};
 
 app.MapGet("/api/customers/{id:int}/consent-url", async (int id, SpectraDbContext db, IConfiguration configuration) =>
 {
@@ -401,7 +454,7 @@ app.MapPost("/api/customers", async (
     // Immediate one-time collection attempt — failure is non-fatal (e.g. the
     // customer's admin hasn't granted consent yet); the customer is saved
     // either way and collection can be retried from Settings.
-    await CollectCustomerDataAsync(customer, db, graphClient, logger);
+    await CollectCustomerDataAsync(customer, db, graphClient, logger, collectionLocks);
 
     return Results.Created($"/api/customers/{customer.Id}", new
     {
@@ -428,7 +481,7 @@ app.MapPost("/api/customers/{id:int}/collect", async (
         return Results.NotFound();
     }
 
-    await CollectCustomerDataAsync(customer, db, graphClient, logger);
+    await CollectCustomerDataAsync(customer, db, graphClient, logger, collectionLocks);
 
     return Results.Ok(new
     {
@@ -653,6 +706,8 @@ app.MapPost("/api/settings/database/provision", async (
                 ConsentGranted = c.ConsentGranted,
                 LastSyncedAt = c.LastSyncedAt,
                 LastSyncError = c.LastSyncError,
+                SecureScoreJson = c.SecureScoreJson,
+                ConditionalAccessPoliciesJson = c.ConditionalAccessPoliciesJson,
                 CreatedAt = c.CreatedAt,
                 CreatedByEmail = c.CreatedByEmail,
             }).ToList();
@@ -681,6 +736,9 @@ app.MapPost("/api/settings/database/provision", async (
                     MailboxItemCount = u.MailboxItemCount,
                     HasArchiveMailbox = u.HasArchiveMailbox,
                     LicensesJson = u.LicensesJson,
+                    MfaJson = u.MfaJson,
+                    ForwardingRulesJson = u.ForwardingRulesJson,
+                    InboxRulesJson = u.InboxRulesJson,
                     SyncedAt = u.SyncedAt,
                 }));
         }
@@ -769,6 +827,19 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
         {
             await db.Database.ExecuteSqlRawAsync("ALTER TABLE Customers ADD COLUMN LastSyncError LONGTEXT NULL");
         }
+        foreach (var (column, definition) in new[]
+        {
+            ("SecureScoreJson", "LONGTEXT NULL"),
+            ("ConditionalAccessPoliciesJson", "LONGTEXT NULL"),
+        })
+        {
+            if (!await ColumnExistsAsync("Customers", column))
+            {
+#pragma warning disable EF1002
+                await db.Database.ExecuteSqlRawAsync($"ALTER TABLE Customers ADD COLUMN {column} {definition}");
+#pragma warning restore EF1002
+            }
+        }
         await db.Database.ExecuteSqlRawAsync("""
             CREATE TABLE IF NOT EXISTS CustomerUsers (
                 Id INT NOT NULL AUTO_INCREMENT,
@@ -786,6 +857,9 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
                 MailboxItemCount INT NULL,
                 HasArchiveMailbox TINYINT(1) NULL,
                 LicensesJson LONGTEXT NULL,
+                MfaJson LONGTEXT NULL,
+                ForwardingRulesJson LONGTEXT NULL,
+                InboxRulesJson LONGTEXT NULL,
                 SyncedAt DATETIME(6) NOT NULL,
                 PRIMARY KEY (Id),
                 UNIQUE KEY IX_CustomerUsers_CustomerId_GraphUserId (CustomerId, GraphUserId)
@@ -800,6 +874,9 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("MailboxItemCount", "INT NULL"),
             ("HasArchiveMailbox", "TINYINT(1) NULL"),
             ("LicensesJson", "LONGTEXT NULL"),
+            ("MfaJson", "LONGTEXT NULL"),
+            ("ForwardingRulesJson", "LONGTEXT NULL"),
+            ("InboxRulesJson", "LONGTEXT NULL"),
         })
         {
             if (!await ColumnExistsAsync("CustomerUsers", column))
@@ -822,6 +899,17 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             "IF COL_LENGTH('Customers', 'LastSyncedAt') IS NULL ALTER TABLE Customers ADD LastSyncedAt datetimeoffset NULL");
         await db.Database.ExecuteSqlRawAsync(
             "IF COL_LENGTH('Customers', 'LastSyncError') IS NULL ALTER TABLE Customers ADD LastSyncError nvarchar(max) NULL");
+        foreach (var (column, definition) in new[]
+        {
+            ("SecureScoreJson", "nvarchar(max) NULL"),
+            ("ConditionalAccessPoliciesJson", "nvarchar(max) NULL"),
+        })
+        {
+#pragma warning disable EF1002
+            await db.Database.ExecuteSqlRawAsync(
+                $"IF COL_LENGTH('Customers', '{column}') IS NULL ALTER TABLE Customers ADD {column} {definition}");
+#pragma warning restore EF1002
+        }
         await db.Database.ExecuteSqlRawAsync("""
             IF OBJECT_ID('CustomerUsers', 'U') IS NULL
             CREATE TABLE CustomerUsers (
@@ -840,6 +928,9 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
                 MailboxItemCount int NULL,
                 HasArchiveMailbox bit NULL,
                 LicensesJson nvarchar(max) NULL,
+                MfaJson nvarchar(max) NULL,
+                ForwardingRulesJson nvarchar(max) NULL,
+                InboxRulesJson nvarchar(max) NULL,
                 SyncedAt datetimeoffset NOT NULL,
                 CONSTRAINT PK_CustomerUsers PRIMARY KEY (Id),
                 CONSTRAINT IX_CustomerUsers_CustomerId_GraphUserId UNIQUE (CustomerId, GraphUserId)
@@ -854,6 +945,9 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("MailboxItemCount", "int NULL"),
             ("HasArchiveMailbox", "bit NULL"),
             ("LicensesJson", "nvarchar(max) NULL"),
+            ("MfaJson", "nvarchar(max) NULL"),
+            ("ForwardingRulesJson", "nvarchar(max) NULL"),
+            ("InboxRulesJson", "nvarchar(max) NULL"),
         })
         {
             // column/definition come from the hardcoded array above, never user input.
@@ -873,8 +967,15 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
 // permission on top of the User.Read.All everything else uses — its own
 // failure doesn't block users/licenses from still being collected, since
 // tenants may not have granted it yet (see README).
-static async Task CollectCustomerDataAsync(Customer customer, SpectraDbContext db, GraphAppClient graphClient, ILogger logger)
+static async Task CollectCustomerDataAsync(
+    Customer customer,
+    SpectraDbContext db,
+    GraphAppClient graphClient,
+    ILogger logger,
+    ConcurrentDictionary<int, SemaphoreSlim> collectionLocks)
 {
+    var gate = collectionLocks.GetOrAdd(customer.Id, _ => new SemaphoreSlim(1, 1));
+    await gate.WaitAsync();
     try
     {
         var graphUsers = await graphClient.ListUsersAsync(customer.TenantId);
@@ -897,8 +998,9 @@ static async Task CollectCustomerDataAsync(Customer customer, SpectraDbContext d
             }
         });
 
+        var warnings = new List<string>();
+
         Dictionary<string, GraphMailboxUsageDto> mailboxByUpn = new(StringComparer.OrdinalIgnoreCase);
-        string? mailboxWarning = null;
         try
         {
             mailboxByUpn = await graphClient.GetMailboxUsageByUpnAsync(customer.TenantId, token);
@@ -906,15 +1008,97 @@ static async Task CollectCustomerDataAsync(Customer customer, SpectraDbContext d
         catch (GraphPermissionDeniedException ex)
         {
             logger.LogWarning(ex, "Reports.Read.All not yet effective for tenant {TenantId}", customer.TenantId);
-            mailboxWarning = "Users and licenses synced, but mailbox data is unavailable: the Reports.Read.All " +
-                "permission isn't granted yet for this tenant — click Grant consent again and re-collect.";
+            warnings.Add("mailbox data unavailable — Reports.Read.All isn't granted yet");
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to get mailbox usage for tenant {TenantId}", customer.TenantId);
             // Not a permission problem — don't tell the admin to re-consent when
             // that isn't the actual fix; show Graph's own explanation instead.
-            mailboxWarning = $"Users and licenses synced, but mailbox data is unavailable: {ex.Message}";
+            warnings.Add($"mailbox data unavailable — {ex.Message}");
+        }
+
+        var mfaByUserId = new Dictionary<string, GraphMfaDto>();
+        var mfaPermissionDenied = false;
+        await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (u, ct) =>
+        {
+            try
+            {
+                var mfa = await graphClient.GetAuthenticationMethodsAsync(customer.TenantId, u.Id, token, ct);
+                lock (mfaByUserId) mfaByUserId[u.Id] = mfa;
+            }
+            catch (GraphPermissionDeniedException)
+            {
+                mfaPermissionDenied = true;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to get authentication methods for {UserId} in tenant {TenantId}", u.Id, customer.TenantId);
+            }
+        });
+        if (mfaPermissionDenied)
+        {
+            warnings.Add("MFA data unavailable — UserAuthenticationMethod.Read.All isn't granted yet");
+        }
+
+        try
+        {
+            var policies = await graphClient.GetConditionalAccessPoliciesAsync(customer.TenantId, token);
+            customer.ConditionalAccessPoliciesJson = JsonSerializer.Serialize(policies);
+        }
+        catch (GraphPermissionDeniedException ex)
+        {
+            logger.LogWarning(ex, "Policy.Read.All not granted for tenant {TenantId}", customer.TenantId);
+            warnings.Add("Conditional Access data unavailable — Policy.Read.All isn't granted yet");
+            customer.ConditionalAccessPoliciesJson = null;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to get Conditional Access policies for tenant {TenantId}", customer.TenantId);
+            warnings.Add($"Conditional Access data unavailable — {ex.Message}");
+            customer.ConditionalAccessPoliciesJson = null;
+        }
+
+        try
+        {
+            var secureScore = await graphClient.GetSecureScoreAsync(customer.TenantId, token);
+            customer.SecureScoreJson = secureScore is null ? null : JsonSerializer.Serialize(secureScore);
+        }
+        catch (GraphPermissionDeniedException ex)
+        {
+            logger.LogWarning(ex, "SecurityEvents.Read.All not granted for tenant {TenantId}", customer.TenantId);
+            warnings.Add("Secure Score unavailable — SecurityEvents.Read.All isn't granted yet");
+            customer.SecureScoreJson = null;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to get Secure Score for tenant {TenantId}", customer.TenantId);
+            warnings.Add($"Secure Score unavailable — {ex.Message}");
+            customer.SecureScoreJson = null;
+        }
+
+        var inboxRulesByUserId = new Dictionary<string, List<GraphInboxRuleDto>>();
+        var inboxRulesPermissionDenied = false;
+        await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (u, ct) =>
+        {
+            try
+            {
+                Console.WriteLine($"DEBUG inbox rules lookup: {u.UserPrincipalName} ({u.Id})");
+                var rules = await graphClient.GetInboxRulesAsync(customer.TenantId, u.Id, token, ct);
+                lock (inboxRulesByUserId) inboxRulesByUserId[u.Id] = rules;
+            }
+            catch (GraphPermissionDeniedException)
+            {
+                inboxRulesPermissionDenied = true;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to get inbox rules for {UserId} in tenant {TenantId}", u.Id, customer.TenantId);
+            }
+        });
+        if (inboxRulesPermissionDenied)
+        {
+            warnings.Add("inbox rule data unavailable — MailboxSettings.Read isn't granted yet");
         }
 
         var existing = await db.CustomerUsers.Where(u => u.CustomerId == customer.Id).ToListAsync();
@@ -924,6 +1108,7 @@ static async Task CollectCustomerDataAsync(Customer customer, SpectraDbContext d
         db.CustomerUsers.AddRange(graphUsers.Select(u =>
         {
             var mailbox = mailboxByUpn.GetValueOrDefault(u.UserPrincipalName);
+            var mfa = mfaByUserId.GetValueOrDefault(u.Id);
             return new CustomerUser
             {
                 CustomerId = customer.Id,
@@ -940,13 +1125,22 @@ static async Task CollectCustomerDataAsync(Customer customer, SpectraDbContext d
                 MailboxItemCount = mailbox?.ItemCount,
                 HasArchiveMailbox = mailbox?.HasArchive,
                 LicensesJson = licensesByUserId.TryGetValue(u.Id, out var licenses) ? SerializeLicenses(licenses) : null,
+                MfaJson = mfa is null ? null : JsonSerializer.Serialize(mfa),
+                InboxRulesJson = inboxRulesByUserId.TryGetValue(u.Id, out var inboxRules) ? JsonSerializer.Serialize(inboxRules) : null,
+                ForwardingRulesJson = inboxRulesByUserId.TryGetValue(u.Id, out var allRules)
+                    ? JsonSerializer.Serialize(allRules
+                        .Where(r => r.ForwardsTo.Count > 0)
+                        .Select(r => new GraphForwardingRuleDto(r.Name, r.Enabled, r.ForwardsTo)))
+                    : null,
                 SyncedAt = now,
             };
         }));
 
         customer.ConsentGranted = true;
         customer.LastSyncedAt = now;
-        customer.LastSyncError = mailboxWarning;
+        customer.LastSyncError = warnings.Count == 0
+            ? null
+            : $"Users and licenses synced, but some data is unavailable: {string.Join("; ", warnings)}.";
     }
     catch (Exception ex)
     {
@@ -954,7 +1148,21 @@ static async Task CollectCustomerDataAsync(Customer customer, SpectraDbContext d
         customer.LastSyncError = ex.Message;
     }
 
-    await db.SaveChangesAsync();
+    try
+    {
+        await db.SaveChangesAsync();
+    }
+    catch (Exception ex)
+    {
+        // The per-customer lock above should make this unreachable in
+        // practice — kept as a backstop so any other save failure still
+        // surfaces as a normal API error instead of an unhandled 500.
+        logger.LogError(ex, "Failed to save collected data for customer {CustomerId}", customer.Id);
+    }
+    finally
+    {
+        gate.Release();
+    }
 }
 
 static string SerializeLicenses(List<GraphLicenseDto> licenses) =>
@@ -970,6 +1178,54 @@ static List<object> DeserializeLicenses(string? licensesJson)
     {
         var raw = JsonSerializer.Deserialize<List<StoredLicense>>(licensesJson) ?? [];
         return raw.Select(l => (object)new { l.SkuId, l.SkuPartNumber, DisplayName = LicenseSkuNames.DisplayName(l.SkuPartNumber) }).ToList();
+    }
+    catch (JsonException)
+    {
+        return [];
+    }
+}
+
+static GraphMfaDto? DeserializeMfa(string? mfaJson)
+{
+    if (string.IsNullOrEmpty(mfaJson))
+    {
+        return null;
+    }
+    try
+    {
+        return JsonSerializer.Deserialize<GraphMfaDto>(mfaJson);
+    }
+    catch (JsonException)
+    {
+        return null;
+    }
+}
+
+static List<GraphForwardingRuleDto> DeserializeForwardingRules(string? rulesJson)
+{
+    if (string.IsNullOrEmpty(rulesJson))
+    {
+        return [];
+    }
+    try
+    {
+        return JsonSerializer.Deserialize<List<GraphForwardingRuleDto>>(rulesJson) ?? [];
+    }
+    catch (JsonException)
+    {
+        return [];
+    }
+}
+
+static List<GraphInboxRuleDto> DeserializeInboxRules(string? rulesJson)
+{
+    if (string.IsNullOrEmpty(rulesJson))
+    {
+        return [];
+    }
+    try
+    {
+        return JsonSerializer.Deserialize<List<GraphInboxRuleDto>>(rulesJson) ?? [];
     }
     catch (JsonException)
     {
