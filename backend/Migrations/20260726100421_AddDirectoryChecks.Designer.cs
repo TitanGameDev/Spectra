@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Spectra.Api.Data;
 
@@ -10,9 +11,11 @@ using Spectra.Api.Data;
 namespace Spectra.Api.Migrations
 {
     [DbContext(typeof(SpectraDbContext))]
-    partial class SpectraDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260726100421_AddDirectoryChecks")]
+    partial class AddDirectoryChecks
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -91,9 +94,6 @@ namespace Spectra.Api.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("DnsRecordChecksJson")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("ExoAcceptedDomainsJson")
                         .HasColumnType("TEXT");
 
@@ -125,9 +125,6 @@ namespace Spectra.Api.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ExoMailboxAuditBypassJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoMailboxForwardingJson")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ExoMalwareFilterPoliciesJson")
@@ -163,26 +160,8 @@ namespace Spectra.Api.Migrations
                     b.Property<DateTimeOffset?>("LastSyncedAt")
                         .HasColumnType("TEXT");
 
-                    b.Property<bool>("MailboxDataConcealed")
-                        .HasColumnType("INTEGER");
-
                     b.Property<string>("Name")
                         .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SccAlertPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SccDlpPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("SccLastCollectedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SccLastError")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SccRetentionPoliciesJson")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("SecureScoreControlProfilesJson")
