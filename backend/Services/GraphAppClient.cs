@@ -44,7 +44,24 @@ public record GraphConditionalAccessPolicyDto(
     string? GrantControlsOperator,
     List<string>? BuiltInControls);
 
-public record GraphSecureScoreDto(double CurrentScore, double MaxScore, DateTimeOffset? CreatedDateTime);
+public record GraphControlScoreDto(string ControlName, string? ControlCategory, string? Description, double Score);
+
+public record GraphSecureScoreDto(double CurrentScore, double MaxScore, DateTimeOffset? CreatedDateTime, List<GraphControlScoreDto> ControlScores);
+
+public record GraphSecureScoreControlProfileDto(
+    string Id,
+    string? Title,
+    string? ControlCategory,
+    double MaxScore,
+    string? Rank,
+    string? Tier,
+    string? ImplementationCost,
+    string? UserImpact,
+    string? ActionType,
+    string? Remediation,
+    string? RemediationImpact,
+    List<string> Threats,
+    bool Deprecated);
 
 public record GraphForwardingRuleDto(string Name, bool Enabled, List<string> ForwardsTo);
 
@@ -403,6 +420,87 @@ public class GraphAppClient(HttpClient httpClient, IConfiguration configuration)
         return policies;
     }
 
+    // Fixed, Microsoft-documented role-template GUID for the built-in Global
+    // Administrator directory role — identical across every Entra tenant,
+    // same reasoning as GlobalReaderRoleTemplateId above.
+    private const string GlobalAdministratorRoleTemplateId = "62e90394-69f5-4237-9190-012177145e10";
+
+    // Tenant-wide, not per-user — needs RoleManagement.ReadWrite.Directory,
+    // the same permission already granted for
+    // EnsureGlobalReaderRoleAssignedAsync (that permission's read surface
+    // covers directory role membership too, not just role assignment
+    // writes), so this needs no new consent on top of what EXO setup
+    // already requires. Uses the classic /directoryRoles endpoint (not the
+    // newer /roleManagement/directory/roleAssignments one used for
+    // self-assignment above) since it's a simpler two-call shape for "list
+    // the members of a built-in role" — the role has to be "activated" (at
+    // least one member ever assigned) to have a /directoryRoles entry,
+    // which is true for Global Administrator in every real tenant.
+    public async Task<List<GraphUserDto>> GetGlobalAdministratorsAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        var roleUrl = $"https://graph.microsoft.com/v1.0/directoryRoles?$filter=roleTemplateId eq '{GlobalAdministratorRoleTemplateId}'";
+        using var roleDoc = await GetGraphJsonAsync(roleUrl, token, "Graph directory roles request", ct);
+
+        if (!roleDoc.RootElement.TryGetProperty("value", out var roles) || roles.GetArrayLength() == 0)
+        {
+            // No /directoryRoles entry means the role has never been
+            // activated in this tenant — vanishingly unlikely for Global
+            // Administrator specifically, but fail soft rather than throw.
+            return [];
+        }
+
+        var roleId = GetOptionalString(roles[0], "id");
+        if (roleId is null)
+        {
+            return [];
+        }
+
+        var members = new List<GraphUserDto>();
+        var membersUrl = $"https://graph.microsoft.com/v1.0/directoryRoles/{roleId}/members?$select=id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation,accountEnabled,createdDateTime";
+        using var membersDoc = await GetGraphJsonAsync(membersUrl, token, "Graph directory role members request", ct);
+
+        if (membersDoc.RootElement.TryGetProperty("value", out var valueArray))
+        {
+            foreach (var item in valueArray.EnumerateArray())
+            {
+                var id = GetOptionalString(item, "id");
+                var upn = GetOptionalString(item, "userPrincipalName");
+                // Role members can include service principals (apps), which
+                // don't have a userPrincipalName — skip those, this check is
+                // about human admin accounts.
+                if (id is null || upn is null)
+                {
+                    continue;
+                }
+                members.Add(new GraphUserDto(
+                    id,
+                    GetOptionalString(item, "displayName"),
+                    GetOptionalString(item, "mail"),
+                    upn,
+                    GetOptionalString(item, "jobTitle"),
+                    GetOptionalString(item, "department"),
+                    GetOptionalString(item, "officeLocation"),
+                    item.TryGetProperty("accountEnabled", out var ae) && ae.ValueKind == JsonValueKind.True,
+                    GetOptionalDateTimeOffset(item, "createdDateTime")));
+            }
+        }
+
+        return members;
+    }
+
+    // Tenant-wide — needs Policy.Read.All, the same permission already used
+    // for Conditional Access above. Null (not false) if the policy can't be
+    // read, so callers can distinguish "confirmed disabled" from "unknown".
+    public async Task<bool?> GetSecurityDefaultsEnabledAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        using var doc = await GetGraphJsonAsync(
+            "https://graph.microsoft.com/v1.0/policies/identitySecurityDefaultsEnforcementPolicy", token, "Graph Security Defaults policy request", ct);
+
+        return doc.RootElement.TryGetProperty("isEnabled", out var isEnabled) && isEnabled.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? isEnabled.GetBoolean()
+            : null;
+    }
+
     private static List<string> GetStringArray(JsonElement parent, string property)
     {
         if (parent.ValueKind != JsonValueKind.Object || !parent.TryGetProperty(property, out var array) || array.ValueKind != JsonValueKind.Array)
@@ -432,7 +530,74 @@ public class GraphAppClient(HttpClient httpClient, IConfiguration configuration)
             return null;
         }
 
-        return new GraphSecureScoreDto(currentScore.Value, maxScore.Value, GetOptionalDateTimeOffset(item, "createdDateTime"));
+        var controlScores = new List<GraphControlScoreDto>();
+        if (item.TryGetProperty("controlScores", out var controlScoresEl) && controlScoresEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var control in controlScoresEl.EnumerateArray())
+            {
+                var controlName = GetOptionalString(control, "controlName");
+                if (controlName is null) continue;
+                var score = control.TryGetProperty("score", out var scoreEl) && scoreEl.ValueKind == JsonValueKind.Number
+                    ? scoreEl.GetDouble()
+                    : 0;
+                controlScores.Add(new GraphControlScoreDto(
+                    controlName,
+                    GetOptionalString(control, "controlCategory"),
+                    GetOptionalString(control, "description"),
+                    score));
+            }
+        }
+
+        return new GraphSecureScoreDto(currentScore.Value, maxScore.Value, GetOptionalDateTimeOffset(item, "createdDateTime"), controlScores);
+    }
+
+    // Tenant-wide catalog of every control Secure Score can evaluate — title,
+    // remediation guidance, max score, category. This is what turns a bare
+    // percentage into an actionable checklist; joined against the achieved
+    // controlScores above (by ControlName == Id) at the API layer. Same
+    // SecurityEvents.Read.All permission as GetSecureScoreAsync.
+    public async Task<List<GraphSecureScoreControlProfileDto>> GetSecureScoreControlProfilesAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        var profiles = new List<GraphSecureScoreControlProfileDto>();
+        string? url = "https://graph.microsoft.com/v1.0/security/secureScoreControlProfiles?$top=200";
+
+        while (url is not null)
+        {
+            using var doc = await GetGraphJsonAsync(url, token, "Graph Secure Score control profiles request", ct);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("value", out var valueArray2))
+            {
+                foreach (var item2 in valueArray2.EnumerateArray())
+                {
+                    var id = GetOptionalString(item2, "id");
+                    if (id is null) continue;
+
+                    var maxScore = item2.TryGetProperty("maxScore", out var maxEl) && maxEl.ValueKind == JsonValueKind.Number
+                        ? maxEl.GetDouble()
+                        : 0;
+                    var deprecated = item2.TryGetProperty("deprecated", out var depEl) && depEl.ValueKind == JsonValueKind.True;
+
+                    profiles.Add(new GraphSecureScoreControlProfileDto(
+                        id,
+                        GetOptionalString(item2, "title"),
+                        GetOptionalString(item2, "controlCategory"),
+                        maxScore,
+                        GetOptionalString(item2, "rank"),
+                        GetOptionalString(item2, "tier"),
+                        GetOptionalString(item2, "implementationCost"),
+                        GetOptionalString(item2, "userImpact"),
+                        GetOptionalString(item2, "actionType"),
+                        GetOptionalString(item2, "remediation"),
+                        GetOptionalString(item2, "remediationImpact"),
+                        GetStringArray(item2, "threats"),
+                        deprecated));
+                }
+            }
+
+            url = root.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+        }
+
+        return profiles;
     }
 
     // One call per user — needs MailboxSettings.Read. Returns every inbox
@@ -490,6 +655,150 @@ public class GraphAppClient(HttpClient httpClient, IConfiguration configuration)
         }
 
         return rules;
+    }
+
+    // Built-in Global Reader role-template GUID — fixed and identical across
+    // every Entra tenant (unlike custom roles), which is what makes hardcoding
+    // it safe. Sufficient for read-only Exchange Online PowerShell app-only
+    // cmdlets per Microsoft's documented app-only auth model, so no separate
+    // Exchange-RBAC-specific role assignment is needed on top of this.
+    private const string GlobalReaderRoleTemplateId = "f2ef992c-3afb-46b9-b7cf-a126ee74c451";
+
+    // Grants Spectra's own service principal read access to run Exchange
+    // Online PowerShell cmdlets in the customer's tenant — a separate,
+    // independent setup step from Graph admin consent (which only covers
+    // Graph API calls, not EXO PowerShell). Idempotent: safe to call on every
+    // collection run until it succeeds. Needs RoleManagement.ReadWrite.Directory.
+    public async Task<bool> EnsureGlobalReaderRoleAssignedAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        // For an app-only (client-credentials) token, the "oid" claim is the
+        // calling application's own service principal object id in the
+        // resource tenant — exactly what's needed as the role assignment's
+        // principalId, without a second Graph call or an extra
+        // Application.Read.All permission.
+        var principalId = GetTokenClaim(token, "oid");
+
+        var body = JsonSerializer.Serialize(new
+        {
+            principalId,
+            roleDefinitionId = GlobalReaderRoleTemplateId,
+            directoryScopeId = "/",
+        });
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, "https://graph.microsoft.com/v1.0/roleManagement/directory/roleAssignments")
+        {
+            Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        using var response = await httpClient.SendAsync(request, ct);
+        if (response.IsSuccessStatusCode)
+        {
+            return true;
+        }
+
+        var responseBody = await response.Content.ReadAsStringAsync(ct);
+        var summary = Summarize(responseBody);
+
+        // A prior successful call (this run, or an earlier one that didn't
+        // get to persist ExoRoleAssigned before a crash/restart) already
+        // created the same assignment — Graph reports that as a conflict,
+        // not success, so it's treated as success explicitly here too.
+        if (response.StatusCode == System.Net.HttpStatusCode.Conflict
+            || summary.Contains("already exists", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new GraphPermissionDeniedException($"Global Reader role assignment failed: {summary}");
+        }
+        throw new InvalidOperationException($"Global Reader role assignment failed: {summary}");
+    }
+
+    // Exchange Online's Connect-ExchangeOnline -Organization parameter needs
+    // the tenant's *.onmicrosoft.com domain, not the tenant ID GUID
+    // Customer.TenantId stores (that GUID works fine for Graph's own token
+    // endpoint and for the role assignment above, but EXO PowerShell's
+    // app-only auth is documented against the domain form) — this resolves it.
+    public async Task<string?> GetInitialDomainAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        using var doc = await GetGraphJsonAsync(
+            "https://graph.microsoft.com/v1.0/organization?$select=verifiedDomains", token, "Graph organization request", ct);
+
+        if (!doc.RootElement.TryGetProperty("value", out var valueArray) || valueArray.GetArrayLength() == 0)
+        {
+            return null;
+        }
+
+        if (valueArray[0].TryGetProperty("verifiedDomains", out var domains) && domains.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var domain in domains.EnumerateArray())
+            {
+                if (domain.TryGetProperty("isInitial", out var isInitial) && isInitial.ValueKind == JsonValueKind.True)
+                {
+                    return GetOptionalString(domain, "name");
+                }
+            }
+        }
+
+        return null;
+    }
+
+    // Every verified domain on the tenant, for SPF/DMARC DNS checks — the
+    // same /organization?$select=verifiedDomains call GetInitialDomainAsync
+    // already relies on above, so this needs no permission beyond what's
+    // already granted (no new admin consent step for this feature).
+    public async Task<List<string>> GetVerifiedDomainsAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        using var doc = await GetGraphJsonAsync(
+            "https://graph.microsoft.com/v1.0/organization?$select=verifiedDomains", token, "Graph organization request", ct);
+
+        var result = new List<string>();
+        if (!doc.RootElement.TryGetProperty("value", out var valueArray) || valueArray.GetArrayLength() == 0)
+        {
+            return result;
+        }
+
+        if (valueArray[0].TryGetProperty("verifiedDomains", out var domains) && domains.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var domain in domains.EnumerateArray())
+            {
+                var name = GetOptionalString(domain, "name");
+                if (name is not null)
+                {
+                    result.Add(name);
+                }
+            }
+        }
+
+        return result;
+    }
+
+    // Decodes a claim straight out of a JWT's payload segment without
+    // validating the signature — safe here specifically because the token
+    // was just freshly issued to us, in this same process, by Azure AD's own
+    // token endpoint (GetAppTokenAsync); this never touches a token that
+    // came from anywhere else.
+    private static string GetTokenClaim(string jwt, string claimName)
+    {
+        var parts = jwt.Split('.');
+        if (parts.Length < 2)
+        {
+            throw new InvalidOperationException("Malformed access token — expected a JWT with a payload segment.");
+        }
+
+        var payload = parts[1].Replace('-', '+').Replace('_', '/');
+        switch (payload.Length % 4)
+        {
+            case 2: payload += "=="; break;
+            case 3: payload += "="; break;
+        }
+
+        var bytes = Convert.FromBase64String(payload);
+        using var doc = JsonDocument.Parse(bytes);
+        return doc.RootElement.GetProperty(claimName).GetString()!;
     }
 
     private async Task<JsonDocument> GetGraphJsonAsync(string url, string token, string operationLabel, CancellationToken ct)

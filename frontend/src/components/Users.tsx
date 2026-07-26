@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useMsal } from "@azure/msal-react";
 import { getCustomerUsers, type CustomerUser } from "../api";
 import { useCustomer } from "../CustomerContext";
+import { SortableHeader, sortRows, toggleSort, type SortState, type SortValue } from "../sorting";
 
 const SUB_TABS = [
   { key: "directory", label: "Directory" },
@@ -10,6 +11,36 @@ const SUB_TABS = [
 ] as const;
 
 type SubTabKey = (typeof SUB_TABS)[number]["key"];
+
+const DIRECTORY_ACCESSORS: Record<string, (u: CustomerUser) => SortValue> = {
+  name: (u) => u.displayName ?? "",
+  email: (u) => u.mail ?? u.userPrincipalName,
+  jobTitle: (u) => u.jobTitle ?? "",
+  department: (u) => u.department ?? "",
+  office: (u) => u.officeLocation ?? "",
+  status: (u) => u.accountEnabled,
+  created: (u) => (u.createdDateTime ? new Date(u.createdDateTime).getTime() : null),
+};
+
+const MAILBOX_ACCESSORS: Record<string, (u: CustomerUser) => SortValue> = {
+  name: (u) => u.displayName ?? "",
+  email: (u) => u.mail ?? u.userPrincipalName,
+  size: (u) => u.mailbox?.sizeBytes ?? null,
+  items: (u) => u.mailbox?.itemCount ?? null,
+  archive: (u) => u.mailbox?.hasArchive ?? null,
+};
+
+const LICENSE_ACCESSORS: Record<string, (u: CustomerUser) => SortValue> = {
+  name: (u) => u.displayName ?? "",
+  email: (u) => u.mail ?? u.userPrincipalName,
+  licenses: (u) => u.licenses.length,
+};
+
+const ACCESSORS_BY_SUB_TAB: Record<SubTabKey, Record<string, (u: CustomerUser) => SortValue>> = {
+  directory: DIRECTORY_ACCESSORS,
+  mailboxes: MAILBOX_ACCESSORS,
+  licenses: LICENSE_ACCESSORS,
+};
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null) return "—";
@@ -28,6 +59,7 @@ export default function Users() {
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState("");
   const [subTab, setSubTab] = useState<SubTabKey>("directory");
+  const [sort, setSort] = useState<SortState<string> | null>(null);
 
   const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
 
@@ -74,6 +106,9 @@ export default function Users() {
   // rather than every mailbox genuinely having no data.
   const hasAnyMailboxData = users?.some((u) => u.mailbox !== null) ?? false;
 
+  const sortedUsers = sortRows(filtered, sort, ACCESSORS_BY_SUB_TAB[subTab]);
+  const handleSort = (key: string) => setSort((prev) => toggleSort(prev, key));
+
   return (
     <>
       <div className="dashboard-intro">
@@ -102,7 +137,10 @@ export default function Users() {
                   <button
                     key={tab.key}
                     className={`subtab-link${subTab === tab.key ? " subtab-link-active" : ""}`}
-                    onClick={() => setSubTab(tab.key)}
+                    onClick={() => {
+                      setSubTab(tab.key);
+                      setSort(null);
+                    }}
                   >
                     {tab.label}
                   </button>
@@ -119,8 +157,20 @@ export default function Users() {
 
               {subTab === "mailboxes" && !hasAnyMailboxData && (
                 <p className="fine-print">
-                  No mailbox data yet — this needs the Reports.Read.All Graph permission on top of the one used for
-                  the directory. See the README, then grant consent again and re-collect.
+                  {selectedCustomer?.mailboxDataConcealed ? (
+                    <>
+                      Mailbox data came back from Microsoft, but user identities are concealed — a Microsoft 365
+                      privacy setting, not a missing permission. In the Microsoft 365 admin center, go to{" "}
+                      <strong>Settings → Org Settings → Services → Reports</strong>, check{" "}
+                      <strong>"Display Concealed user, group, and site names in all reports"</strong>, and save. It
+                      takes a few minutes to take effect, then re-collect from Settings.
+                    </>
+                  ) : (
+                    <>
+                      No mailbox data yet — this needs the Reports.Read.All Graph permission on top of the one used
+                      for the directory. See the README, then grant consent again and re-collect.
+                    </>
+                  )}
                 </p>
               )}
 
@@ -130,17 +180,17 @@ export default function Users() {
                     <>
                       <thead>
                         <tr>
-                          <th>Name</th>
-                          <th>Email</th>
-                          <th>Job title</th>
-                          <th>Department</th>
-                          <th>Office</th>
-                          <th>Status</th>
-                          <th>Created</th>
+                          <SortableHeader label="Name" columnKey="name" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Email" columnKey="email" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Job title" columnKey="jobTitle" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Department" columnKey="department" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Office" columnKey="office" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Status" columnKey="status" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Created" columnKey="created" sort={sort} onSort={handleSort} />
                         </tr>
                       </thead>
                       <tbody>
-                        {filtered.map((user) => (
+                        {sortedUsers.map((user) => (
                           <tr key={user.id}>
                             <td>{user.displayName ?? "—"}</td>
                             <td>{user.mail ?? user.userPrincipalName}</td>
@@ -164,15 +214,15 @@ export default function Users() {
                     <>
                       <thead>
                         <tr>
-                          <th>Name</th>
-                          <th>Email</th>
-                          <th>Size</th>
-                          <th>Items</th>
-                          <th>Archive</th>
+                          <SortableHeader label="Name" columnKey="name" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Email" columnKey="email" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Size" columnKey="size" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Items" columnKey="items" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Archive" columnKey="archive" sort={sort} onSort={handleSort} />
                         </tr>
                       </thead>
                       <tbody>
-                        {filtered.map((user) => (
+                        {sortedUsers.map((user) => (
                           <tr key={user.id}>
                             <td>{user.displayName ?? "—"}</td>
                             <td>{user.mail ?? user.userPrincipalName}</td>
@@ -195,13 +245,13 @@ export default function Users() {
                     <>
                       <thead>
                         <tr>
-                          <th>Name</th>
-                          <th>Email</th>
-                          <th>Licenses</th>
+                          <SortableHeader label="Name" columnKey="name" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Email" columnKey="email" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Licenses" columnKey="licenses" sort={sort} onSort={handleSort} />
                         </tr>
                       </thead>
                       <tbody>
-                        {filtered.map((user) => (
+                        {sortedUsers.map((user) => (
                           <tr key={user.id}>
                             <td>{user.displayName ?? "—"}</td>
                             <td>{user.mail ?? user.userPrincipalName}</td>

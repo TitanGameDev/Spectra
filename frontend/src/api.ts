@@ -62,6 +62,19 @@ export function resetToSqlite(instance: IPublicClientApplication): Promise<{ act
   return apiFetch(instance, "/api/system/reset-to-sqlite", { method: "POST" });
 }
 
+// Not tied to any customer — the EXO certificate is one app-wide file.
+export interface ExoCertificateStatus {
+  configured: boolean;
+  expiresAt: string | null;
+  daysRemaining: number | null;
+  expiringSoon: boolean;
+  error: string | null;
+}
+
+export function getExoCertificateStatus(instance: IPublicClientApplication): Promise<ExoCertificateStatus> {
+  return apiFetch<ExoCertificateStatus>(instance, "/api/system/exo-certificate-status");
+}
+
 export interface MeResponse {
   name: string | null;
   email: string | null;
@@ -130,6 +143,12 @@ export function getConsentUrl(instance: IPublicClientApplication, customerId: nu
 export interface CustomerSummary {
   id: number;
   name: string;
+  // True when the last mailbox usage collection came back with every row
+  // keyed by an anonymized identifier — a tenant-wide Microsoft 365 report
+  // privacy setting, not a missing Graph permission. Lets the Mailboxes
+  // sub-tab (Users.tsx) show the actual fix instead of the generic
+  // "needs Reports.Read.All" message.
+  mailboxDataConcealed: boolean;
 }
 
 export function getCustomerSummaries(instance: IPublicClientApplication): Promise<CustomerSummary[]> {
@@ -210,13 +229,116 @@ export interface ConditionalAccessPolicy {
   builtInControls: string[];
 }
 
+export interface SecureScoreControl {
+  id: string;
+  title: string | null;
+  category: string | null;
+  achievedScore: number;
+  maxScore: number;
+  rank: string | null;
+  tier: string | null;
+  implementationCost: string | null;
+  userImpact: string | null;
+  actionType: string | null;
+  remediation: string | null;
+  remediationImpact: string | null;
+  threats: string[];
+}
+
 export interface CustomerSecurityInfo {
   secureScore: { currentScore: number; maxScore: number; createdDateTime: string | null } | null;
+  secureScoreControls: SecureScoreControl[];
   conditionalAccessPolicies: ConditionalAccessPolicy[];
 }
 
 export function getCustomerSecurity(instance: IPublicClientApplication, customerId: number): Promise<CustomerSecurityInfo> {
   return apiFetch<CustomerSecurityInfo>(instance, `/api/customers/${customerId}/security`);
+}
+
+export interface OrcaCheckResult {
+  id: string;
+  title: string;
+  category: string;
+  status: "pass" | "fail" | "info";
+  currentValue: string;
+  remediation: string;
+}
+
+// Mailbox-level auto-forwarding (the ForwardingAddress/ForwardingSmtpAddress
+// mailbox property) — set via the Exchange admin center's Mail flow > Edit
+// forwarding panel, or a user's own OWA "Forwarding" setting. A different
+// mechanism from CustomerUserForwardingRule above (an inbox rule).
+export interface ExoMailboxForwarding {
+  userPrincipalName: string | null;
+  forwardingAddress: string | null;
+  forwardingSmtpAddress: string | null;
+  deliverToMailboxAndForward: boolean | null;
+}
+
+// A mail flow ("transport") rule, configured tenant-wide in the Exchange
+// admin center — distinct from a per-user inbox rule.
+export interface ExoTransportRule {
+  name: string | null;
+  state: string | null;
+  priority: number | null;
+  description: string | null;
+  setSCL: string | null;
+  deleteMessage: boolean | null;
+}
+
+// Exchange Online PowerShell data is a separate collection track from
+// everything in CustomerSecurityInfo above — it needs its own one-time setup
+// (Spectra's app being granted the Global Reader role in the customer's
+// tenant) that's independent of, and can lag behind, Graph admin consent.
+export interface EmailSecurityInfo {
+  exoRoleAssigned: boolean;
+  exoLastCollectedAt: string | null;
+  exoLastError: string | null;
+  checks: OrcaCheckResult[];
+  mailboxForwarding: ExoMailboxForwarding[];
+  transportRules: ExoTransportRule[];
+}
+
+export function getCustomerEmailSecurity(instance: IPublicClientApplication, customerId: number): Promise<EmailSecurityInfo> {
+  return apiFetch<EmailSecurityInfo>(instance, `/api/customers/${customerId}/email-security`);
+}
+
+// Identity/RBAC checks sourced from Graph, not Exchange Online PowerShell —
+// unlike EmailSecurityInfo, there's no separate access-grant track here, so
+// no exoRoleAssigned/exoLastCollectedAt-style setup fields: everything this
+// needs is already covered by the app's existing Graph permission set.
+export interface IdentitySecurityInfo {
+  checks: OrcaCheckResult[];
+}
+
+export function getCustomerIdentitySecurity(instance: IPublicClientApplication, customerId: number): Promise<IdentitySecurityInfo> {
+  return apiFetch<IdentitySecurityInfo>(instance, `/api/customers/${customerId}/identity-security`);
+}
+
+// SPF/DMARC checks sourced from live public DNS lookups, not Graph or
+// Exchange Online PowerShell — same no-setup shape as IdentitySecurityInfo.
+export interface DomainSecurityInfo {
+  checks: OrcaCheckResult[];
+}
+
+export function getCustomerDomainSecurity(instance: IPublicClientApplication, customerId: number): Promise<DomainSecurityInfo> {
+  return apiFetch<DomainSecurityInfo>(instance, `/api/customers/${customerId}/domain-security`);
+}
+
+// DLP/retention/alert policy checks sourced from Security & Compliance
+// PowerShell (Connect-IPPSSession) — a sibling session to the Exchange
+// Online PowerShell one behind EmailSecurityInfo, using the exact same
+// certificate and Global Reader role, so it shares exoRoleAssigned as its
+// setup-gate rather than having its own.
+export interface ComplianceSecurityInfo {
+  exoRoleAssigned: boolean;
+  sccLastCollectedAt: string | null;
+  sccLastError: string | null;
+  checks: OrcaCheckResult[];
+}
+
+export function getCustomerComplianceSecurity(instance: IPublicClientApplication, customerId: number): Promise<ComplianceSecurityInfo> {
+  return apiFetch<ComplianceSecurityInfo>(instance, `/api/customers/${customerId}/compliance-security`);
 }
 
 export type DatabaseType = "sqlserver" | "mysql";
