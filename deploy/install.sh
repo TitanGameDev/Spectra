@@ -312,6 +312,13 @@ EOF
   ( cd "$SPECTRA_SRC_DIR/frontend" && npm ci --silent && npm run build --silent )
   rm -rf "${SPECTRA_WEB_ROOT:?}"/*
   cp -r "$SPECTRA_SRC_DIR/frontend/dist/." "$SPECTRA_WEB_ROOT/"
+  # nginx serves this as its own unprivileged worker user (www-data), not
+  # root — mkdir/cp above only end up world-readable if root's umask happens
+  # to allow it, which isn't guaranteed (some hardened cloud images default
+  # to a much stricter umask). Without this, nginx gets EACCES trying to
+  # read index.html and serves a bare 403 with no indication why.
+  chmod 755 "$(dirname "$SPECTRA_WEB_ROOT")" "$SPECTRA_WEB_ROOT"
+  chmod -R o+rX "$SPECTRA_WEB_ROOT"
 }
 
 write_backend_env() {
