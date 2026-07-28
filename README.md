@@ -39,6 +39,7 @@ You need **two** App Registrations in your tenant:
    - Platform: Single-page application
    - Redirect URI: `http://localhost:5173`
    - Note the **Application (client) ID** and **Directory (tenant) ID** → these go in `frontend/.env`.
+   - **Deploying to a real domain**: add its origin (e.g. `https://app.example.com`) as a *second* redirect URI here too — but it must go under the same **Single-page application** platform block as `localhost`, not a new **Web** one. Adding it under **Web** (an easy mistake, since that's what the *backend* app registration below uses) produces `AADSTS9002326: Cross-origin token redemption is permitted only for the 'Single-Page Application' client-type` the moment someone tries to sign in from that domain — MSAL's browser-based token redemption is only permitted for redirect URIs registered as SPA. Fix: **Authentication** → find the URI under **Web** → remove it → **Add a platform** → **Single-page application** → add it there instead.
 2. **Backend (API)**
    - Expose an API → add a scope, e.g. `access_as_user` → this gives you `api://<backend-client-id>/access_as_user`.
    - Note the **Application (client) ID** → this goes in `backend/.env` as `AzureAd__ClientId`.
