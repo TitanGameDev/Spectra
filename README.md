@@ -1,5 +1,23 @@
 # Spectra
 
+## Deploy
+
+For a fresh Ubuntu/Debian server, [`deploy/install.sh`](deploy/install.sh) automates the entire "Production hardening" checklist further down this doc end to end — it's the fast path; that checklist is still the reference for what it's actually doing and for any other distro.
+
+```bash
+curl -fsSL https://<wherever-you-host-this-file>/install.sh | sudo bash
+```
+
+There's no public URL for it baked in — this is an internal tool on a private repo, so host the raw file wherever makes sense for you (an internal web server, a gist, S3 with restricted access) rather than a plain public GitHub raw link. If you'd rather not fetch-and-pipe at all, cloning the repo and running `sudo bash deploy/install.sh` from inside it works identically (it detects it's already sitting in a checkout).
+
+**What it does**: installs the .NET 8 SDK, Node.js, MySQL Server, nginx, and (optionally) certbot; builds and publishes both the backend and frontend; creates a dedicated `spectra` system user and a `spectra.service` systemd unit (`Restart=on-failure`, hardened with `ProtectSystem=strict`/`NoNewPrivileges`); provisions an empty MySQL database + user for Spectra and writes the generated credentials to `/etc/spectra/mysql-credentials.txt` (root-only); and configures nginx from the same template as [`deploy/nginx/spectra.conf`](deploy/nginx/spectra.conf).
+
+**What it deliberately leaves to you** (can't be automated generically — see [Azure AD (Entra ID) setup](#azure-ad-entra-id-setup) below): creating the Azure AD app registrations, granting per-customer admin consent, and the Exchange Online PowerShell certificate for the Email Security tab. It'll prompt for the Azure AD tenant/client IDs if you already have them (blank is fine — fill them into `/etc/spectra/backend.env` and re-run later), but it can't create the app registrations themselves. It also only *provisions* the MySQL database — the actual cutover from the default local SQLite database still happens through **Settings → Database** in the browser once you're signed in (see [Database](#database-sql-server--mysql) below), using the credentials the script printed.
+
+**Non-interactive use**: every prompt (domain, TLS, firewall, Azure AD IDs) is also an environment variable — set `SPECTRA_DOMAIN=app.example.com SPECTRA_SETUP_TLS=yes ...` before piping it through `bash` to skip prompts entirely; see the script's own header comment for the full list. Safe to re-run — it skips packages/users/certs that already exist and just re-pulls, rebuilds, and restarts the app, same as clicking **Update now** in Settings → Updates (see [One-click update](#one-click-update-settings--updates) below) once it's installed.
+
+Everything below this point covers local development and the full feature/permission reference.
+
 ## Layout
 
 - `frontend/` — React + Vite + TypeScript SPA. Manual "Sign in with Microsoft" button using MSAL popup login.
@@ -187,22 +205,6 @@ Implemented as a sibling to the Email Security pipeline, not merged into it — 
 - **User report** (`GET /api/customers/{id}/users-report`, `UserReportPdfGenerator.cs`): Directory, Licenses, and Mailboxes (the Mailboxes section is omitted if no mailbox data was ever collected or it came back concealed — see the Mailboxes tab note above — rather than shown full of dashes).
 
 Both exclude disabled user accounts entirely (Security report's MFA coverage, User report's Directory/Licenses/Mailboxes) — a disabled account's stale MFA/license state would otherwise skew the picture of the tenant's actual security posture; the User report's summary tiles show how many were excluded. Both re-evaluate/reuse the exact same stored data their on-screen tab already serves — no separate collection or storage path, so a report always matches what the dashboard shows. Rendered via [QuestPDF](https://www.questpdf.com/), a fluent, code-first .NET PDF library — free under its **Community license** for individuals/businesses under **$1M USD annual gross revenue** (see [questpdf.com/license](https://www.questpdf.com/license/community.html) for the full terms; a Professional/Enterprise license is available if that threshold doesn't fit). The frontend can't reuse the normal `apiFetch` helper for either (it always parses JSON) — a shared `downloadFile` helper in `api.ts` fetches the PDF as a blob and triggers a standard browser download instead.
-
-## One-shot installer (deploy/install.sh)
-
-For a fresh Ubuntu/Debian server, [`deploy/install.sh`](deploy/install.sh) automates the entire "Production hardening" checklist below end to end — it's the fast path; the checklist itself is still the reference for what it's actually doing and for any other distro.
-
-```bash
-curl -fsSL https://<wherever-you-host-this-file>/install.sh | sudo bash
-```
-
-There's no public URL for it baked in — this is an internal tool on a private repo, so host the raw file wherever makes sense for you (an internal web server, a gist, S3 with restricted access) rather than a plain public GitHub raw link. If you'd rather not fetch-and-pipe at all, cloning the repo and running `sudo bash deploy/install.sh` from inside it works identically (it detects it's already sitting in a checkout).
-
-**What it does**: installs the .NET 8 SDK, Node.js, MySQL Server, nginx, and (optionally) certbot; builds and publishes both the backend and frontend; creates a dedicated `spectra` system user and a `spectra.service` systemd unit (`Restart=on-failure`, hardened with `ProtectSystem=strict`/`NoNewPrivileges`); provisions an empty MySQL database + user for Spectra and writes the generated credentials to `/etc/spectra/mysql-credentials.txt` (root-only); and configures nginx from the same template as [`deploy/nginx/spectra.conf`](deploy/nginx/spectra.conf).
-
-**What it deliberately leaves to you** (can't be automated generically — see [Azure AD (Entra ID) setup](#azure-ad-entra-id-setup)): creating the Azure AD app registrations, granting per-customer admin consent, and the Exchange Online PowerShell certificate for the Email Security tab. It'll prompt for the Azure AD tenant/client IDs if you already have them (blank is fine — fill them into `/etc/spectra/backend.env` and re-run later), but it can't create the app registrations themselves. It also only *provisions* the MySQL database — the actual cutover from the default local SQLite database still happens through **Settings → Database** in the browser once you're signed in, exactly as described below, using the credentials the script printed.
-
-**Non-interactive use**: every prompt (domain, TLS, firewall, Azure AD IDs) is also an environment variable — set `SPECTRA_DOMAIN=app.example.com SPECTRA_SETUP_TLS=yes ...` before piping it through `bash` to skip prompts entirely; see the script's own header comment for the full list. Safe to re-run — it skips packages/users/certs that already exist and just re-pulls, rebuilds, and restarts the app, same as clicking **Update now** in Settings (below) once it's installed.
 
 ## One-click update (Settings → Updates)
 
