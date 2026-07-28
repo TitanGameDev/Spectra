@@ -8,3 +8,5 @@ obj/
 *.db-wal
 database-provider.json
 keys/
+certs/
+.DS_Store

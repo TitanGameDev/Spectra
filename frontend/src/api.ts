@@ -62,6 +62,19 @@ export function resetToSqlite(instance: IPublicClientApplication): Promise<{ act
   return apiFetch(instance, "/api/system/reset-to-sqlite", { method: "POST" });
 }
 
+// Not tied to any customer — the EXO certificate is one app-wide file.
+export interface ExoCertificateStatus {
+  configured: boolean;
+  expiresAt: string | null;
+  daysRemaining: number | null;
+  expiringSoon: boolean;
+  error: string | null;
+}
+
+export function getExoCertificateStatus(instance: IPublicClientApplication): Promise<ExoCertificateStatus> {
+  return apiFetch<ExoCertificateStatus>(instance, "/api/system/exo-certificate-status");
+}
+
 export interface MeResponse {
   name: string | null;
   email: string | null;
@@ -130,6 +143,12 @@ export function getConsentUrl(instance: IPublicClientApplication, customerId: nu
 export interface CustomerSummary {
   id: number;
   name: string;
+  // True when the last mailbox usage collection came back with every row
+  // keyed by an anonymized identifier — a tenant-wide Microsoft 365 report
+  // privacy setting, not a missing Graph permission. Lets the Mailboxes
+  // sub-tab (Users.tsx) show the actual fix instead of the generic
+  // "needs Reports.Read.All" message.
+  mailboxDataConcealed: boolean;
 }
 
 export function getCustomerSummaries(instance: IPublicClientApplication): Promise<CustomerSummary[]> {
@@ -148,6 +167,34 @@ export interface CustomerUserLicense {
   displayName: string;
 }
 
+export interface CustomerUserMfa {
+  isMfaRegistered: boolean;
+  isMfaCapable: boolean;
+  methods: string[];
+}
+
+// From Graph's proxyAddresses (User.Read.All, already granted) — isPrimary
+// reflects the uppercase "SMTP:" vs lowercase "smtp:" prefix Graph uses.
+export interface UserAlias {
+  address: string;
+  isPrimary: boolean;
+}
+
+export interface CustomerUserForwardingRule {
+  name: string;
+  enabled: boolean;
+  forwardsTo: string[];
+}
+
+export interface CustomerUserInboxRule {
+  name: string;
+  enabled: boolean;
+  sequence: number;
+  conditionTypes: string[];
+  actionTypes: string[];
+  forwardsTo: string[];
+}
+
 export interface CustomerUser {
   id: number;
   graphUserId: string;
@@ -162,10 +209,282 @@ export interface CustomerUser {
   syncedAt: string;
   mailbox: CustomerUserMailbox | null;
   licenses: CustomerUserLicense[];
+  mfa: CustomerUserMfa | null;
+  aliases: UserAlias[];
+  forwardingRules: CustomerUserForwardingRule[];
+  inboxRules: CustomerUserInboxRule[];
 }
 
 export function getCustomerUsers(instance: IPublicClientApplication, customerId: number): Promise<CustomerUser[]> {
   return apiFetch<CustomerUser[]>(instance, `/api/customers/${customerId}/users`);
+}
+
+export interface ConditionalAccessPolicy {
+  displayName: string;
+  state: string;
+  createdDateTime: string | null;
+  modifiedDateTime: string | null;
+  includeUsers: string[];
+  excludeUsers: string[];
+  includeGroups: string[];
+  excludeGroups: string[];
+  includeRoles: string[];
+  excludeRoles: string[];
+  includeApplications: string[];
+  excludeApplications: string[];
+  clientAppTypes: string[];
+  grantControlsOperator: string | null;
+  builtInControls: string[];
+}
+
+export interface SecureScoreControl {
+  id: string;
+  title: string | null;
+  category: string | null;
+  achievedScore: number;
+  maxScore: number;
+  rank: string | null;
+  tier: string | null;
+  implementationCost: string | null;
+  userImpact: string | null;
+  actionType: string | null;
+  remediation: string | null;
+  remediationImpact: string | null;
+  threats: string[];
+}
+
+export interface CustomerSecurityInfo {
+  secureScore: { currentScore: number; maxScore: number; createdDateTime: string | null } | null;
+  secureScoreControls: SecureScoreControl[];
+  conditionalAccessPolicies: ConditionalAccessPolicy[];
+}
+
+export function getCustomerSecurity(instance: IPublicClientApplication, customerId: number): Promise<CustomerSecurityInfo> {
+  return apiFetch<CustomerSecurityInfo>(instance, `/api/customers/${customerId}/security`);
+}
+
+export interface OrcaCheckResult {
+  id: string;
+  title: string;
+  category: string;
+  status: "pass" | "fail" | "info";
+  currentValue: string;
+  remediation: string;
+}
+
+// Mailbox-level auto-forwarding (the ForwardingAddress/ForwardingSmtpAddress
+// mailbox property) — set via the Exchange admin center's Mail flow > Edit
+// forwarding panel, or a user's own OWA "Forwarding" setting. A different
+// mechanism from CustomerUserForwardingRule above (an inbox rule).
+export interface ExoMailboxForwarding {
+  userPrincipalName: string | null;
+  forwardingAddress: string | null;
+  forwardingSmtpAddress: string | null;
+  deliverToMailboxAndForward: boolean | null;
+}
+
+// A mail flow ("transport") rule, configured tenant-wide in the Exchange
+// admin center — distinct from a per-user inbox rule.
+export interface ExoTransportRule {
+  name: string | null;
+  state: string | null;
+  priority: number | null;
+  description: string | null;
+  setSCL: string | null;
+  deleteMessage: boolean | null;
+}
+
+// Full Access (and other) delegate grants on a mailbox — who besides the
+// owner can open it. NT AUTHORITY\SELF and inherited entries are already
+// filtered out server-side, so every row here is a genuine, explicit grant.
+export interface ExoMailboxPermission {
+  identity: string | null;
+  user: string | null;
+  accessRights: string[] | null;
+  deny: boolean | null;
+}
+
+// Send As grants — a different permission from mailbox access above: lets a
+// delegate send mail that appears to come from the mailbox.
+export interface ExoRecipientPermission {
+  identity: string | null;
+  trustee: string | null;
+  accessRights: string[] | null;
+}
+
+// Exchange Online PowerShell data is a separate collection track from
+// everything in CustomerSecurityInfo above — it needs its own one-time setup
+// (Spectra's app being granted the Global Reader role in the customer's
+// tenant) that's independent of, and can lag behind, Graph admin consent.
+export interface EmailSecurityInfo {
+  exoRoleAssigned: boolean;
+  exoLastCollectedAt: string | null;
+  exoLastError: string | null;
+  checks: OrcaCheckResult[];
+  mailboxForwarding: ExoMailboxForwarding[];
+  transportRules: ExoTransportRule[];
+  mailboxPermissions: ExoMailboxPermission[];
+  recipientPermissions: ExoRecipientPermission[];
+}
+
+export function getCustomerEmailSecurity(instance: IPublicClientApplication, customerId: number): Promise<EmailSecurityInfo> {
+  return apiFetch<EmailSecurityInfo>(instance, `/api/customers/${customerId}/email-security`);
+}
+
+// Identity/RBAC checks sourced from Graph, not Exchange Online PowerShell —
+// unlike EmailSecurityInfo, there's no separate access-grant track here, so
+// no exoRoleAssigned/exoLastCollectedAt-style setup fields: everything this
+// needs is already covered by the app's existing Graph permission set.
+export interface IdentitySecurityInfo {
+  checks: OrcaCheckResult[];
+}
+
+export function getCustomerIdentitySecurity(instance: IPublicClientApplication, customerId: number): Promise<IdentitySecurityInfo> {
+  return apiFetch<IdentitySecurityInfo>(instance, `/api/customers/${customerId}/identity-security`);
+}
+
+// SPF/DMARC checks sourced from live public DNS lookups, not Graph or
+// Exchange Online PowerShell — same no-setup shape as IdentitySecurityInfo.
+export interface DomainSecurityInfo {
+  checks: OrcaCheckResult[];
+}
+
+export function getCustomerDomainSecurity(instance: IPublicClientApplication, customerId: number): Promise<DomainSecurityInfo> {
+  return apiFetch<DomainSecurityInfo>(instance, `/api/customers/${customerId}/domain-security`);
+}
+
+// DLP/retention/alert policy checks sourced from Security & Compliance
+// PowerShell (Connect-IPPSSession) — a sibling session to the Exchange
+// Online PowerShell one behind EmailSecurityInfo, using the exact same
+// certificate and Global Reader role, so it shares exoRoleAssigned as its
+// setup-gate rather than having its own.
+export interface ComplianceSecurityInfo {
+  exoRoleAssigned: boolean;
+  sccLastCollectedAt: string | null;
+  sccLastError: string | null;
+  checks: OrcaCheckResult[];
+}
+
+export function getCustomerComplianceSecurity(instance: IPublicClientApplication, customerId: number): Promise<ComplianceSecurityInfo> {
+  return apiFetch<ComplianceSecurityInfo>(instance, `/api/customers/${customerId}/compliance-security`);
+}
+
+// Azure Resource Manager data — a separate collection track from everything
+// above, authorized by Azure RBAC role assignment on the customer's
+// subscription(s) rather than Entra admin consent. See the README for the
+// exact Azure Portal steps; there's no Graph consent screen involved here.
+export interface AzureSubscription {
+  id: string;
+  displayName: string;
+  state: string;
+}
+
+export interface AzureVirtualMachine {
+  subscriptionId: string;
+  subscriptionName: string;
+  resourceGroup: string;
+  name: string;
+  location: string;
+  vmSize: string | null;
+  osType: string | null;
+  powerState: string | null;
+}
+
+export interface AzureAppService {
+  subscriptionId: string;
+  subscriptionName: string;
+  resourceGroup: string;
+  name: string;
+  kind: string | null;
+  state: string | null;
+  defaultHostName: string | null;
+  location: string;
+}
+
+// Reservations need a second, tenant-scoped RBAC role (Reservations Reader)
+// separate from the subscription-scoped Reader role above — see README.
+export interface AzureReservation {
+  reservationOrderId: string;
+  displayName: string | null;
+  skuName: string | null;
+  quantity: number;
+  provisioningState: string | null;
+  expiryDateTime: string | null;
+  term: string | null;
+  appliedScopeType: string | null;
+}
+
+// Entra App Registrations — Graph-sourced (needs Application.Read.All, a
+// separate new permission from everything ARM-sourced above).
+export interface EntraAppRegistration {
+  id: string;
+  appId: string;
+  displayName: string | null;
+  signInAudience: string | null;
+  createdDateTime: string | null;
+  soonestCredentialExpiry: string | null;
+}
+
+// Enterprise Applications — every service principal in the tenant, including
+// third-party/gallery apps, not just ones registered here.
+export interface EntraServicePrincipal {
+  id: string;
+  appId: string;
+  displayName: string | null;
+  servicePrincipalType: string | null;
+  createdDateTime: string | null;
+}
+
+export interface AzureResourceInfo {
+  azureLastCollectedAt: string | null;
+  azureLastError: string | null;
+  subscriptions: AzureSubscription[];
+  virtualMachines: AzureVirtualMachine[];
+  appServices: AzureAppService[];
+  reservations: AzureReservation[];
+  entraAppRegistrations: EntraAppRegistration[];
+  entraServicePrincipals: EntraServicePrincipal[];
+}
+
+export function getCustomerAzureResources(instance: IPublicClientApplication, customerId: number): Promise<AzureResourceInfo> {
+  return apiFetch<AzureResourceInfo>(instance, `/api/customers/${customerId}/azure`);
+}
+
+// Downloads the branded PDF snapshot of a customer's security posture. Can't
+// go through apiFetch (it always parses the response as JSON) — fetches the
+// PDF as a blob instead, then triggers a normal browser file download via a
+// throwaway object URL/anchor, same trick used for any programmatic download.
+// Shared by every "download a generated PDF" call — fetches as a blob (can't
+// go through apiFetch, which always parses the response as JSON) and
+// triggers a normal browser file download via a throwaway object URL/anchor.
+async function downloadFile(instance: IPublicClientApplication, path: string, fileName: string): Promise<void> {
+  const token = await acquireToken(instance, apiScopes);
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to generate report: ${response.status} ${response.statusText}`);
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+export function downloadCustomerReport(instance: IPublicClientApplication, customerId: number, customerName: string): Promise<void> {
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  return downloadFile(instance, `/api/customers/${customerId}/report`, `${customerName} Security Report ${dateStamp}.pdf`);
+}
+
+export function downloadCustomerUserReport(instance: IPublicClientApplication, customerId: number, customerName: string): Promise<void> {
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  return downloadFile(instance, `/api/customers/${customerId}/users-report`, `${customerName} User Report ${dateStamp}.pdf`);
 }
 
 export type DatabaseType = "sqlserver" | "mysql";
@@ -212,6 +531,43 @@ export function provisionDatabase(
   instance: IPublicClientApplication,
 ): Promise<{ success: boolean; activeProvider: string }> {
   return apiFetch(instance, "/api/settings/database/provision", { method: "POST" });
+}
+
+// Settings -> Updates panel. Only meaningful on a server set up by
+// deploy/install.sh — see the README's "One-click update" section. This
+// endpoint never performs an update itself, only reports what a root-owned
+// process (install.sh / update.sh) has recorded.
+export interface AppVersionInfo {
+  commit: string;
+  ref: string;
+  deployedAt: string;
+}
+
+export type UpdateState = "unavailable" | "idle" | "running" | "succeeded" | "failed";
+
+export interface UpdateRunStatus {
+  state: UpdateState;
+  message: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface UpdateStatusResponse {
+  currentVersion: AppVersionInfo | null;
+  updateAvailable: boolean | null;
+  latestCommit: string | null;
+  status: UpdateRunStatus;
+}
+
+export function getUpdateStatus(instance: IPublicClientApplication): Promise<UpdateStatusResponse> {
+  return apiFetch<UpdateStatusResponse>(instance, "/api/settings/update-status");
+}
+
+// Never performs the update inline — the backend only writes a request flag
+// a separate systemd unit watches for. Resolves once the request is queued;
+// throws (via apiFetch's non-2xx handling) if one's already in progress.
+export function requestUpdate(instance: IPublicClientApplication): Promise<{ queued: boolean }> {
+  return apiFetch(instance, "/api/settings/update", { method: "POST" });
 }
 
 // Object URL for the user's Microsoft profile photo, or null if they don't have one set

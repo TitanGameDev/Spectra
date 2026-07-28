@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Spectra.Api.Data;
 
@@ -10,9 +11,11 @@ using Spectra.Api.Data;
 namespace Spectra.Api.Migrations
 {
     [DbContext(typeof(SpectraDbContext))]
-    partial class SpectraDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260722173950_AddSecurityData")]
+    partial class AddSecurityData
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -78,24 +81,6 @@ namespace Spectra.Api.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("AzureAppServicesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("AzureLastCollectedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AzureLastError")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AzureReservationsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AzureSubscriptionsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AzureVirtualMachinesJson")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("ConditionalAccessPoliciesJson")
                         .HasColumnType("TEXT");
 
@@ -109,120 +94,18 @@ namespace Spectra.Api.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("DnsRecordChecksJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("EntraAppRegistrationsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("EntraServicePrincipalsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoAcceptedDomainsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoAdminAuditLogConfigJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoAntiPhishPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoAtpPolicyForO365Json")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoDkimSigningConfigsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoHostedConnectionFilterPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoHostedContentFilterPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoHostedOutboundSpamFilterPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("ExoLastCollectedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoLastError")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoMailboxAuditBypassJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoMailboxForwardingJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoMailboxPermissionsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoMalwareFilterPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoOrganizationConfigJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoRecipientPermissionsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoRemoteDomainsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("ExoRoleAssigned")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("ExoSafeAttachmentPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoSafeLinksPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoSharingPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("ExoTransportRulesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("GlobalAdminsJson")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("LastSyncError")
                         .HasColumnType("TEXT");
 
                     b.Property<DateTimeOffset?>("LastSyncedAt")
                         .HasColumnType("TEXT");
 
-                    b.Property<bool>("MailboxDataConcealed")
-                        .HasColumnType("INTEGER");
-
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("SccAlertPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SccDlpPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("SccLastCollectedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SccLastError")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SccRetentionPoliciesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("SecureScoreControlProfilesJson")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("SecureScoreJson")
                         .HasColumnType("TEXT");
-
-                    b.Property<bool?>("SecurityDefaultsEnabled")
-                        .HasColumnType("INTEGER");
 
                     b.Property<string>("TenantId")
                         .IsRequired()
@@ -241,9 +124,6 @@ namespace Spectra.Api.Migrations
 
                     b.Property<bool>("AccountEnabled")
                         .HasColumnType("INTEGER");
-
-                    b.Property<string>("AliasesJson")
-                        .HasColumnType("TEXT");
 
                     b.Property<DateTimeOffset?>("CreatedDateTime")
                         .HasColumnType("TEXT");
@@ -266,9 +146,6 @@ namespace Spectra.Api.Migrations
 
                     b.Property<bool?>("HasArchiveMailbox")
                         .HasColumnType("INTEGER");
-
-                    b.Property<string>("InboxRulesJson")
-                        .HasColumnType("TEXT");
 
                     b.Property<string>("JobTitle")
                         .HasColumnType("TEXT");
