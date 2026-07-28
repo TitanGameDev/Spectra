@@ -696,6 +696,17 @@ body {
   color: white;
 }
 
+.subsection-heading {
+  margin: 1.5rem 0 0.65rem;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.subsection-heading:first-child {
+  margin-top: 0;
+}
+
 .data-table-wrap {
   width: 100%;
   overflow-x: auto;

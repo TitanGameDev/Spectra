@@ -173,6 +173,13 @@ export interface CustomerUserMfa {
   methods: string[];
 }
 
+// From Graph's proxyAddresses (User.Read.All, already granted) — isPrimary
+// reflects the uppercase "SMTP:" vs lowercase "smtp:" prefix Graph uses.
+export interface UserAlias {
+  address: string;
+  isPrimary: boolean;
+}
+
 export interface CustomerUserForwardingRule {
   name: string;
   enabled: boolean;
@@ -203,6 +210,7 @@ export interface CustomerUser {
   mailbox: CustomerUserMailbox | null;
   licenses: CustomerUserLicense[];
   mfa: CustomerUserMfa | null;
+  aliases: UserAlias[];
   forwardingRules: CustomerUserForwardingRule[];
   inboxRules: CustomerUserInboxRule[];
 }
@@ -286,6 +294,24 @@ export interface ExoTransportRule {
   deleteMessage: boolean | null;
 }
 
+// Full Access (and other) delegate grants on a mailbox — who besides the
+// owner can open it. NT AUTHORITY\SELF and inherited entries are already
+// filtered out server-side, so every row here is a genuine, explicit grant.
+export interface ExoMailboxPermission {
+  identity: string | null;
+  user: string | null;
+  accessRights: string[] | null;
+  deny: boolean | null;
+}
+
+// Send As grants — a different permission from mailbox access above: lets a
+// delegate send mail that appears to come from the mailbox.
+export interface ExoRecipientPermission {
+  identity: string | null;
+  trustee: string | null;
+  accessRights: string[] | null;
+}
+
 // Exchange Online PowerShell data is a separate collection track from
 // everything in CustomerSecurityInfo above — it needs its own one-time setup
 // (Spectra's app being granted the Global Reader role in the customer's
@@ -297,6 +323,8 @@ export interface EmailSecurityInfo {
   checks: OrcaCheckResult[];
   mailboxForwarding: ExoMailboxForwarding[];
   transportRules: ExoTransportRule[];
+  mailboxPermissions: ExoMailboxPermission[];
+  recipientPermissions: ExoRecipientPermission[];
 }
 
 export function getCustomerEmailSecurity(instance: IPublicClientApplication, customerId: number): Promise<EmailSecurityInfo> {
@@ -339,6 +367,124 @@ export interface ComplianceSecurityInfo {
 
 export function getCustomerComplianceSecurity(instance: IPublicClientApplication, customerId: number): Promise<ComplianceSecurityInfo> {
   return apiFetch<ComplianceSecurityInfo>(instance, `/api/customers/${customerId}/compliance-security`);
+}
+
+// Azure Resource Manager data — a separate collection track from everything
+// above, authorized by Azure RBAC role assignment on the customer's
+// subscription(s) rather than Entra admin consent. See the README for the
+// exact Azure Portal steps; there's no Graph consent screen involved here.
+export interface AzureSubscription {
+  id: string;
+  displayName: string;
+  state: string;
+}
+
+export interface AzureVirtualMachine {
+  subscriptionId: string;
+  subscriptionName: string;
+  resourceGroup: string;
+  name: string;
+  location: string;
+  vmSize: string | null;
+  osType: string | null;
+  powerState: string | null;
+}
+
+export interface AzureAppService {
+  subscriptionId: string;
+  subscriptionName: string;
+  resourceGroup: string;
+  name: string;
+  kind: string | null;
+  state: string | null;
+  defaultHostName: string | null;
+  location: string;
+}
+
+// Reservations need a second, tenant-scoped RBAC role (Reservations Reader)
+// separate from the subscription-scoped Reader role above — see README.
+export interface AzureReservation {
+  reservationOrderId: string;
+  displayName: string | null;
+  skuName: string | null;
+  quantity: number;
+  provisioningState: string | null;
+  expiryDateTime: string | null;
+  term: string | null;
+  appliedScopeType: string | null;
+}
+
+// Entra App Registrations — Graph-sourced (needs Application.Read.All, a
+// separate new permission from everything ARM-sourced above).
+export interface EntraAppRegistration {
+  id: string;
+  appId: string;
+  displayName: string | null;
+  signInAudience: string | null;
+  createdDateTime: string | null;
+  soonestCredentialExpiry: string | null;
+}
+
+// Enterprise Applications — every service principal in the tenant, including
+// third-party/gallery apps, not just ones registered here.
+export interface EntraServicePrincipal {
+  id: string;
+  appId: string;
+  displayName: string | null;
+  servicePrincipalType: string | null;
+  createdDateTime: string | null;
+}
+
+export interface AzureResourceInfo {
+  azureLastCollectedAt: string | null;
+  azureLastError: string | null;
+  subscriptions: AzureSubscription[];
+  virtualMachines: AzureVirtualMachine[];
+  appServices: AzureAppService[];
+  reservations: AzureReservation[];
+  entraAppRegistrations: EntraAppRegistration[];
+  entraServicePrincipals: EntraServicePrincipal[];
+}
+
+export function getCustomerAzureResources(instance: IPublicClientApplication, customerId: number): Promise<AzureResourceInfo> {
+  return apiFetch<AzureResourceInfo>(instance, `/api/customers/${customerId}/azure`);
+}
+
+// Downloads the branded PDF snapshot of a customer's security posture. Can't
+// go through apiFetch (it always parses the response as JSON) — fetches the
+// PDF as a blob instead, then triggers a normal browser file download via a
+// throwaway object URL/anchor, same trick used for any programmatic download.
+// Shared by every "download a generated PDF" call — fetches as a blob (can't
+// go through apiFetch, which always parses the response as JSON) and
+// triggers a normal browser file download via a throwaway object URL/anchor.
+async function downloadFile(instance: IPublicClientApplication, path: string, fileName: string): Promise<void> {
+  const token = await acquireToken(instance, apiScopes);
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to generate report: ${response.status} ${response.statusText}`);
+  }
+
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+export function downloadCustomerReport(instance: IPublicClientApplication, customerId: number, customerName: string): Promise<void> {
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  return downloadFile(instance, `/api/customers/${customerId}/report`, `${customerName} Security Report ${dateStamp}.pdf`);
+}
+
+export function downloadCustomerUserReport(instance: IPublicClientApplication, customerId: number, customerName: string): Promise<void> {
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  return downloadFile(instance, `/api/customers/${customerId}/users-report`, `${customerName} User Report ${dateStamp}.pdf`);
 }
 
 export type DatabaseType = "sqlserver" | "mysql";
@@ -385,6 +531,43 @@ export function provisionDatabase(
   instance: IPublicClientApplication,
 ): Promise<{ success: boolean; activeProvider: string }> {
   return apiFetch(instance, "/api/settings/database/provision", { method: "POST" });
+}
+
+// Settings -> Updates panel. Only meaningful on a server set up by
+// deploy/install.sh — see the README's "One-click update" section. This
+// endpoint never performs an update itself, only reports what a root-owned
+// process (install.sh / update.sh) has recorded.
+export interface AppVersionInfo {
+  commit: string;
+  ref: string;
+  deployedAt: string;
+}
+
+export type UpdateState = "unavailable" | "idle" | "running" | "succeeded" | "failed";
+
+export interface UpdateRunStatus {
+  state: UpdateState;
+  message: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
+export interface UpdateStatusResponse {
+  currentVersion: AppVersionInfo | null;
+  updateAvailable: boolean | null;
+  latestCommit: string | null;
+  status: UpdateRunStatus;
+}
+
+export function getUpdateStatus(instance: IPublicClientApplication): Promise<UpdateStatusResponse> {
+  return apiFetch<UpdateStatusResponse>(instance, "/api/settings/update-status");
+}
+
+// Never performs the update inline — the backend only writes a request flag
+// a separate systemd unit watches for. Resolves once the request is queued;
+// throws (via apiFetch's non-2xx handling) if one's already in progress.
+export function requestUpdate(instance: IPublicClientApplication): Promise<{ queued: boolean }> {
+  return apiFetch(instance, "/api/settings/update", { method: "POST" });
 }
 
 // Object URL for the user's Microsoft profile photo, or null if they don't have one set

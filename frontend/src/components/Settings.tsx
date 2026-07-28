@@ -12,11 +12,14 @@ import {
   getDatabaseStatus,
   saveDatabaseConnection,
   provisionDatabase,
+  getUpdateStatus,
+  requestUpdate,
   type GraphGroup,
   type SettingsResponse,
   type Customer,
   type DatabaseStatus,
   type DatabaseType,
+  type UpdateStatusResponse,
 } from "../api";
 
 const DEFAULT_PORTS: Record<DatabaseType, string> = { sqlserver: "1433", mysql: "3306" };
@@ -66,6 +69,11 @@ export default function Settings() {
   const [provisionError, setProvisionError] = useState<string | null>(null);
   const [switchedProvider, setSwitchedProvider] = useState<DatabaseType | null>(null);
 
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatusResponse | null>(null);
+  const [updateStatusError, setUpdateStatusError] = useState<string | null>(null);
+  const [requestingUpdate, setRequestingUpdate] = useState(false);
+  const [requestUpdateError, setRequestUpdateError] = useState<string | null>(null);
+
   const handleDbTypeChange = (type: DatabaseType) => {
     setDbType(type);
     setDbPort(DEFAULT_PORTS[type]);
@@ -76,6 +84,13 @@ export default function Settings() {
     getDatabaseStatus(instance)
       .then(setDbStatus)
       .catch((err) => setDbStatusError(err instanceof Error ? err.message : "Failed to load database status"));
+  }, [instance, me?.isAdmin]);
+
+  useEffect(() => {
+    if (!me?.isAdmin) return;
+    getUpdateStatus(instance)
+      .then(setUpdateStatus)
+      .catch((err) => setUpdateStatusError(err instanceof Error ? err.message : "Failed to load update status"));
   }, [instance, me?.isAdmin]);
 
   useEffect(() => {
@@ -264,6 +279,37 @@ export default function Settings() {
       setProvisionError(err instanceof Error ? err.message : "Failed to create the database");
     } finally {
       setProvisioning(false);
+    }
+  };
+
+  // The update itself restarts the backend (see README's "One-click update"),
+  // so a request or two failing mid-poll is expected, not an error — only
+  // stop once a successful response says the run has actually finished.
+  const pollUpdateStatus = async () => {
+    for (let attempt = 0; attempt < 60; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 4000));
+      try {
+        const status = await getUpdateStatus(instance);
+        setUpdateStatus(status);
+        if (status.status.state !== "running") return;
+      } catch {
+        // Backend is most likely mid-restart — keep polling.
+      }
+    }
+  };
+
+  const handleRequestUpdate = async () => {
+    setRequestingUpdate(true);
+    setRequestUpdateError(null);
+    try {
+      await requestUpdate(instance);
+      const status = await getUpdateStatus(instance).catch(() => null);
+      if (status) setUpdateStatus(status);
+      await pollUpdateStatus();
+    } catch (err) {
+      setRequestUpdateError(err instanceof Error ? err.message : "Failed to request an update");
+    } finally {
+      setRequestingUpdate(false);
     }
   };
 
@@ -557,6 +603,67 @@ export default function Settings() {
 
         {switchedProvider && (
           <p className="fine-print">Switched to {DATABASE_LABELS[switchedProvider]} — Spectra is now using this database.</p>
+        )}
+      </div>
+
+      <div className="settings-panel">
+        <h2>Updates</h2>
+        <p className="settings-hint">
+          Pulls the latest code, rebuilds, and restarts the backend in place — only available on a server set up by{" "}
+          <code>deploy/install.sh</code>. The backend process itself never gains any elevated privilege: this only
+          requests an update, a separate root-owned service on the server does the actual work.
+        </p>
+
+        {updateStatusError && <p className="login-error">{updateStatusError}</p>}
+
+        {updateStatus && updateStatus.status.state === "unavailable" ? (
+          <p className="fine-print">Not available on this deployment — not installed via deploy/install.sh.</p>
+        ) : updateStatus ? (
+          <>
+            {updateStatus.currentVersion ? (
+              <p className="fine-print">
+                Running <code>{updateStatus.currentVersion.commit.slice(0, 8)}</code> ({updateStatus.currentVersion.ref}) —
+                deployed {new Date(updateStatus.currentVersion.deployedAt).toLocaleString()}
+              </p>
+            ) : (
+              <p className="fine-print">Version unknown — no successful install/update recorded yet.</p>
+            )}
+
+            {updateStatus.updateAvailable === true && (
+              <p className="fine-print">
+                Update available: <code>{updateStatus.latestCommit?.slice(0, 8)}</code>
+              </p>
+            )}
+
+            {updateStatus.status.state === "running" && (
+              <p className="fine-print">
+                <span className="status-dot status-dot-checking" aria-hidden="true" />
+                Update in progress — this restarts the backend, the page may briefly disconnect.
+              </p>
+            )}
+            {updateStatus.status.state === "succeeded" && updateStatus.status.finishedAt && (
+              <p className="fine-print">
+                <span className="status-dot status-dot-connected" aria-hidden="true" />
+                Last update succeeded at {new Date(updateStatus.status.finishedAt).toLocaleString()}.
+              </p>
+            )}
+            {updateStatus.status.state === "failed" && (
+              <p className="login-error">Last update failed: {updateStatus.status.message}</p>
+            )}
+
+            <div className="settings-actions">
+              <button
+                className="btn btn-primary"
+                onClick={handleRequestUpdate}
+                disabled={requestingUpdate || updateStatus.status.state === "running"}
+              >
+                {requestingUpdate || updateStatus.status.state === "running" ? "Updating…" : "Update now"}
+              </button>
+            </div>
+            {requestUpdateError && <p className="login-error">{requestUpdateError}</p>}
+          </>
+        ) : (
+          !updateStatusError && <p className="fine-print">Loading…</p>
         )}
       </div>
     </>

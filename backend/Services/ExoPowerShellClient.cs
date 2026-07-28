@@ -62,6 +62,17 @@ public record ExoMailboxForwardingDto(
     string? ForwardingSmtpAddress,
     bool? DeliverToMailboxAndForward);
 
+// Full Access (and other) delegate grants on a mailbox — who besides the
+// owner can open it. Excludes NT AUTHORITY\SELF (every mailbox's own
+// default self-grant) and inherited entries, so only explicit, meaningful
+// delegate access shows up (see Collect-ExoSecurityData.ps1's filtering).
+public record ExoMailboxPermissionDto(string? Identity, string? User, List<string>? AccessRights, bool? Deny);
+
+// Send As grants — a different permission from mailbox access above: lets a
+// delegate send mail that appears to come from the mailbox, without being
+// able to open/read it.
+public record ExoRecipientPermissionDto(string? Identity, string? Trustee, List<string>? AccessRights);
+
 public record ExoCollectionResultDto(
     ExoOrganizationConfigDto? OrganizationConfig,
     List<ExoAcceptedDomainDto>? AcceptedDomains,
@@ -79,7 +90,9 @@ public record ExoCollectionResultDto(
     ExoAtpPolicyForO365Dto? AtpPolicyForO365,
     List<ExoRemoteDomainDto>? RemoteDomains,
     List<ExoMailboxAuditBypassDto>? MailboxAuditBypass,
-    List<ExoMailboxForwardingDto>? MailboxForwarding);
+    List<ExoMailboxForwardingDto>? MailboxForwarding,
+    List<ExoMailboxPermissionDto>? MailboxPermissions,
+    List<ExoRecipientPermissionDto>? RecipientPermissions);
 
 // Exchange Online access isn't set up yet for this tenant (Global Reader
 // hasn't propagated, or genuinely hasn't been assigned) — distinguishes this
@@ -101,10 +114,12 @@ public class ExoCollectionException(string message) : Exception(message);
 // host (see README), not baked into the app.
 public class ExoPowerShellClient(IConfiguration configuration, ILogger<ExoPowerShellClient> logger)
 {
-    // 150s rather than the original 90s — Get-MailboxAuditBypassAssociation
-    // enumerates every mailbox with a bypass association and can be
+    // 180s rather than the original 90s — Get-MailboxAuditBypassAssociation
+    // enumerates every mailbox with a bypass association, and
+    // Get-EXOMailboxPermission/Get-EXORecipientPermission (added later)
+    // return tenant-wide permission data in one call each but can still be
     // meaningfully slower than the rest of the batch on a large tenant.
-    private static readonly TimeSpan CollectionTimeout = TimeSpan.FromSeconds(150);
+    private static readonly TimeSpan CollectionTimeout = TimeSpan.FromSeconds(180);
 
     public async Task<ExoCollectionResultDto> CollectAsync(string organizationDomain, CancellationToken ct = default)
     {
