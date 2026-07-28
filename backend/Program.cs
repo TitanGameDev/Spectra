@@ -21,6 +21,11 @@ using Spectra.Api.Services;
 // (e.g. production, where real config comes from a secure vault instead).
 DotNetEnv.Env.Load();
 
+// Free for individuals/businesses under $1M USD annual gross revenue (see
+// the README's PDF report section) — set once at startup, no license key
+// needed for the Community tier.
+QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services
@@ -66,6 +71,7 @@ builder.Services.AddScoped<IClaimsTransformation, SpectraClaimsTransformation>()
 // Calls Graph as Spectra's own app registration (client-credentials flow)
 // against a specific customer tenant — see GraphAppClient.cs.
 builder.Services.AddHttpClient<GraphAppClient>();
+builder.Services.AddHttpClient<AzureResourceClient>();
 
 // Shells out to pwsh for Exchange Online PowerShell collection — no HttpClient
 // needed, see ExoPowerShellClient.cs.
@@ -78,6 +84,24 @@ builder.Services.AddSingleton<SccPowerShellClient>();
 // Direct DNS TXT-record lookups for SPF/DMARC checks — no HttpClient, no
 // auth, see DnsCheckClient.cs.
 builder.Services.AddSingleton<DnsCheckClient>();
+
+// Shared per-customer collection lock table (singleton, so it's the same
+// instance regardless of which scope/request resolves it) and the scoped
+// service that actually runs a collection — see CollectionLockRegistry.cs
+// and CustomerCollectionService.cs. One implementation, called by both the
+// manual "Collect data" endpoints below and CustomerSyncBackgroundService's
+// scheduled runs.
+builder.Services.AddSingleton<CollectionLockRegistry>();
+builder.Services.AddScoped<CustomerCollectionService>();
+
+// Runs CustomerCollectionService for every customer on a timer — see
+// CustomerSyncBackgroundService.cs. Configure via Sync:IntervalHours
+// (Sync__IntervalHours in .env); 0 disables it.
+builder.Services.AddHostedService<CustomerSyncBackgroundService>();
+
+// Settings -> Updates panel — see AppUpdateService.cs. Inert (IsConfigured
+// false) unless Update:DataDir is set, which only deploy/install.sh sets.
+builder.Services.AddSingleton<AppUpdateService>();
 
 // Trust X-Forwarded-For/-Proto from nginx so the app sees the real client IP
 // and scheme. Defaults to trusting only loopback proxies, which matches
@@ -126,16 +150,6 @@ builder.Services.AddRateLimiter(options =>
 });
 
 var app = builder.Build();
-
-// Guards CollectCustomerDataAsync per customer — it deletes and re-inserts
-// that customer's CustomerUsers rows, which isn't safe to run concurrently
-// (two overlapping collections race on the same delete, and the second one's
-// DELETE affects 0 rows since the first already removed them, throwing
-// DbUpdateConcurrencyException). This can genuinely happen: adding a customer
-// triggers an immediate collection, and if the admin clicks Grant consent
-// and it completes quickly, the consent-callback tab's auto-collect (see
-// Settings.tsx) can land while that first one is still in flight.
-var collectionLocks = new ConcurrentDictionary<int, SemaphoreSlim>();
 
 using (var scope = app.Services.CreateScope())
 {
@@ -400,9 +414,62 @@ app.MapGet("/api/customers/{id:int}/users", async (int id, SpectraDbContext db) 
             : new { SizeBytes = u.MailboxSizeBytes, ItemCount = u.MailboxItemCount, HasArchive = u.HasArchiveMailbox },
         Licenses = DeserializeLicenses(u.LicensesJson),
         Mfa = DeserializeMfa(u.MfaJson),
+        Aliases = DeserializeExo<List<UserAliasDto>>(u.AliasesJson) ?? [],
         ForwardingRules = DeserializeForwardingRules(u.ForwardingRulesJson),
         InboxRules = DeserializeInboxRules(u.InboxRulesJson),
     }));
+}).RequireAuthorization();
+
+// A branded, downloadable snapshot of the Users tab — Directory, Licenses,
+// and (when available) Mailboxes — reusing the exact same stored data
+// /users above already serves, styled the same way as /report's security
+// snapshot (see UserReportPdfGenerator).
+app.MapGet("/api/customers/{id:int}/users-report", async (int id, SpectraDbContext db) =>
+{
+    var customer = await db.Customers.FindAsync(id);
+    if (customer is null)
+    {
+        return Results.NotFound();
+    }
+
+    var allUsers = await db.CustomerUsers
+        .Where(u => u.CustomerId == id)
+        .OrderBy(u => u.DisplayName)
+        .ToListAsync();
+
+    // Disabled accounts are noise in a client-facing report — someone who
+    // left the org isn't part of "the people at this customer" anymore, and
+    // their stale MFA/license state doesn't tell the client anything useful.
+    var users = allUsers.Where(u => u.AccountEnabled).ToList();
+    var disabledExcludedCount = allUsers.Count - users.Count;
+
+    var rows = users.Select(u => new UserReportUserRow(
+        DisplayName: u.DisplayName ?? u.UserPrincipalName,
+        Email: u.Mail ?? u.UserPrincipalName,
+        JobTitle: u.JobTitle,
+        Department: u.Department,
+        MfaRegistered: DeserializeMfa(u.MfaJson)?.IsMfaRegistered == true,
+        LicenseNames: string.IsNullOrEmpty(u.LicensesJson)
+            ? []
+            : (JsonSerializer.Deserialize<List<StoredLicense>>(u.LicensesJson) ?? [])
+                .Select(l => LicenseSkuNames.DisplayName(l.SkuPartNumber))
+                .ToList(),
+        MailboxSizeBytes: u.MailboxSizeBytes,
+        MailboxItemCount: u.MailboxItemCount)).ToList();
+
+    var mailboxDataAvailable = !customer.MailboxDataConcealed
+        && users.Any(u => u.MailboxSizeBytes is not null || u.MailboxItemCount is not null);
+
+    var report = new UserReportData(
+        CustomerName: customer.Name,
+        GeneratedAt: DateTimeOffset.UtcNow,
+        MailboxDataAvailable: mailboxDataAvailable,
+        DisabledExcludedCount: disabledExcludedCount,
+        Users: rows);
+
+    var pdfBytes = UserReportPdfGenerator.Generate(report);
+    var fileName = $"{customer.Name} User Report {DateTime.UtcNow:yyyy-MM-dd}.pdf".Replace('/', '-');
+    return Results.File(pdfBytes, "application/pdf", fileName);
 }).RequireAuthorization();
 
 app.MapGet("/api/customers/{id:int}/security", async (int id, SpectraDbContext db) =>
@@ -441,6 +508,8 @@ app.MapGet("/api/customers/{id:int}/email-security", async (int id, SpectraDbCon
 
     var mailboxForwarding = DeserializeExo<List<ExoMailboxForwardingDto>>(customer.ExoMailboxForwardingJson);
     var transportRules = DeserializeExo<List<ExoTransportRuleDto>>(customer.ExoTransportRulesJson);
+    var mailboxPermissions = DeserializeExo<List<ExoMailboxPermissionDto>>(customer.ExoMailboxPermissionsJson);
+    var recipientPermissions = DeserializeExo<List<ExoRecipientPermissionDto>>(customer.ExoRecipientPermissionsJson);
 
     var checks = customer.ExoLastCollectedAt is null
         ? []
@@ -470,11 +539,38 @@ app.MapGet("/api/customers/{id:int}/email-security", async (int id, SpectraDbCon
         customer.ExoLastError,
         Checks = checks,
         // Raw collected data, not just pass/fail checks — lets the frontend
-        // show mailbox forwarding (Forwarding Rules tab) and mail flow rules
-        // (Mail Flow Rules tab) as browsable tables, not just baked into a
-        // single check each.
+        // show mailbox forwarding (Forwarding Rules tab), mail flow rules
+        // (Mail Flow Rules tab), and delegate access (Mailbox Access tab) as
+        // browsable tables, not just baked into a single check each.
         MailboxForwarding = mailboxForwarding ?? [],
         TransportRules = transportRules ?? [],
+        MailboxPermissions = mailboxPermissions ?? [],
+        RecipientPermissions = recipientPermissions ?? [],
+    });
+}).RequireAuthorization();
+
+// Azure Resource Manager + Entra Apps data — two independent tracks with
+// their own setup gates (RBAC role assignment vs Application.Read.All
+// Graph consent, see Customer.AzureSubscriptionsJson/EntraAppRegistrationsJson),
+// so both ride together on one endpoint the same way the tabs sharing it do.
+app.MapGet("/api/customers/{id:int}/azure", async (int id, SpectraDbContext db) =>
+{
+    var customer = await db.Customers.FindAsync(id);
+    if (customer is null)
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Ok(new
+    {
+        customer.AzureLastCollectedAt,
+        customer.AzureLastError,
+        Subscriptions = DeserializeExo<List<AzureSubscriptionDto>>(customer.AzureSubscriptionsJson) ?? [],
+        VirtualMachines = DeserializeExo<List<AzureVirtualMachineDto>>(customer.AzureVirtualMachinesJson) ?? [],
+        AppServices = DeserializeExo<List<AzureAppServiceDto>>(customer.AzureAppServicesJson) ?? [],
+        Reservations = DeserializeExo<List<AzureReservationDto>>(customer.AzureReservationsJson) ?? [],
+        EntraAppRegistrations = DeserializeExo<List<GraphApplicationDto>>(customer.EntraAppRegistrationsJson) ?? [],
+        EntraServicePrincipals = DeserializeExo<List<GraphServicePrincipalDto>>(customer.EntraServicePrincipalsJson) ?? [],
     });
 }).RequireAuthorization();
 
@@ -552,6 +648,93 @@ app.MapGet("/api/customers/{id:int}/domain-security", async (int id, SpectraDbCo
     var checks = DnsCheckEvaluator.Evaluate(domainChecks);
 
     return Results.Ok(new { Checks = checks });
+}).RequireAuthorization();
+
+// A branded, downloadable snapshot of everything the Security tab shows —
+// styled to match the app's own dark theme rather than a generic report
+// template (see SecurityReportPdfGenerator). Re-evaluates the same stored
+// data the 4 check endpoints above already serve, rather than introducing a
+// separate collection or storage path — a customer's report is always
+// exactly what their dashboard already shows, nothing more.
+app.MapGet("/api/customers/{id:int}/report", async (int id, SpectraDbContext db) =>
+{
+    var customer = await db.Customers.FindAsync(id);
+    if (customer is null)
+    {
+        return Results.NotFound();
+    }
+
+    var secureScore = string.IsNullOrEmpty(customer.SecureScoreJson)
+        ? null
+        : JsonSerializer.Deserialize<GraphSecureScoreDto>(customer.SecureScoreJson);
+
+    var caPolicies = string.IsNullOrEmpty(customer.ConditionalAccessPoliciesJson)
+        ? []
+        : JsonSerializer.Deserialize<List<GraphConditionalAccessPolicyDto>>(customer.ConditionalAccessPoliciesJson) ?? [];
+
+    // Disabled accounts are excluded — same reasoning as the User Report:
+    // a departed user's stale MFA state shouldn't count against or for the
+    // tenant's actual MFA coverage in a client-facing report.
+    var mfaRows = await db.CustomerUsers
+        .Where(u => u.CustomerId == id && u.AccountEnabled)
+        .Select(u => u.MfaJson)
+        .ToListAsync();
+    var mfaRegisteredCount = mfaRows.Count(json => DeserializeMfa(json)?.IsMfaRegistered == true);
+
+    var emailSecurityChecks = customer.ExoLastCollectedAt is null
+        ? []
+        : OrcaCheckEvaluator.Evaluate(
+            DeserializeExo<ExoOrganizationConfigDto>(customer.ExoOrganizationConfigJson),
+            DeserializeExo<List<ExoAcceptedDomainDto>>(customer.ExoAcceptedDomainsJson),
+            DeserializeExo<List<ExoAntiPhishPolicyDto>>(customer.ExoAntiPhishPoliciesJson),
+            DeserializeExo<List<ExoSafeLinksPolicyDto>>(customer.ExoSafeLinksPoliciesJson),
+            DeserializeExo<List<ExoSafeAttachmentPolicyDto>>(customer.ExoSafeAttachmentPoliciesJson),
+            DeserializeExo<List<ExoHostedContentFilterPolicyDto>>(customer.ExoHostedContentFilterPoliciesJson),
+            DeserializeExo<List<ExoHostedOutboundSpamFilterPolicyDto>>(customer.ExoHostedOutboundSpamFilterPoliciesJson),
+            DeserializeExo<List<ExoMalwareFilterPolicyDto>>(customer.ExoMalwareFilterPoliciesJson),
+            DeserializeExo<List<ExoDkimSigningConfigDto>>(customer.ExoDkimSigningConfigsJson),
+            DeserializeExo<List<ExoTransportRuleDto>>(customer.ExoTransportRulesJson),
+            DeserializeExo<List<ExoSharingPolicyDto>>(customer.ExoSharingPoliciesJson),
+            DeserializeExo<List<ExoHostedConnectionFilterPolicyDto>>(customer.ExoHostedConnectionFilterPoliciesJson),
+            DeserializeExo<ExoAdminAuditLogConfigDto>(customer.ExoAdminAuditLogConfigJson),
+            DeserializeExo<ExoAtpPolicyForO365Dto>(customer.ExoAtpPolicyForO365Json),
+            DeserializeExo<List<ExoRemoteDomainDto>>(customer.ExoRemoteDomainsJson),
+            DeserializeExo<List<ExoMailboxAuditBypassDto>>(customer.ExoMailboxAuditBypassJson),
+            DeserializeExo<List<ExoMailboxForwardingDto>>(customer.ExoMailboxForwardingJson));
+
+    var identityChecks = DirectoryCheckEvaluator.Evaluate(
+        DeserializeExo<List<GraphUserDto>>(customer.GlobalAdminsJson),
+        customer.SecurityDefaultsEnabled,
+        caPolicies,
+        (await db.CustomerUsers.Where(u => u.CustomerId == id).Select(u => new { u.GraphUserId, u.MfaJson }).ToListAsync())
+            .ToDictionary(u => u.GraphUserId, u => DeserializeMfa(u.MfaJson)?.IsMfaRegistered));
+
+    var domainChecks = DnsCheckEvaluator.Evaluate(DeserializeExo<List<DnsRecordCheckDto>>(customer.DnsRecordChecksJson));
+
+    var complianceChecks = customer.SccLastCollectedAt is null
+        ? []
+        : SccCheckEvaluator.Evaluate(
+            DeserializeExo<List<SccDlpPolicyDto>>(customer.SccDlpPoliciesJson),
+            DeserializeExo<List<SccRetentionPolicyDto>>(customer.SccRetentionPoliciesJson),
+            DeserializeExo<List<SccAlertPolicyDto>>(customer.SccAlertPoliciesJson));
+
+    var report = new SecurityReportData(
+        CustomerName: customer.Name,
+        GeneratedAt: DateTimeOffset.UtcNow,
+        SecureScoreCurrent: secureScore is null ? null : (int)Math.Round(secureScore.CurrentScore),
+        SecureScoreMax: secureScore is null ? null : (int)Math.Round(secureScore.MaxScore),
+        MfaRegisteredCount: mfaRegisteredCount,
+        TotalUserCount: mfaRows.Count,
+        ConditionalAccessEnabledCount: caPolicies.Count(p => p.State == "enabled"),
+        ConditionalAccessTotalCount: caPolicies.Count,
+        EmailSecurityChecks: emailSecurityChecks,
+        IdentityChecks: identityChecks,
+        DomainChecks: domainChecks,
+        ComplianceChecks: complianceChecks);
+
+    var pdfBytes = SecurityReportPdfGenerator.Generate(report);
+    var fileName = $"{customer.Name} Security Report {DateTime.UtcNow:yyyy-MM-dd}.pdf".Replace('/', '-');
+    return Results.File(pdfBytes, "application/pdf", fileName);
 }).RequireAuthorization();
 
 static T? DeserializeExo<T>(string? json)
@@ -677,11 +860,7 @@ app.MapPost("/api/customers", async (
     CreateCustomerRequest request,
     ClaimsPrincipal user,
     SpectraDbContext db,
-    GraphAppClient graphClient,
-    ExoPowerShellClient exoClient,
-    DnsCheckClient dnsClient,
-    SccPowerShellClient sccClient,
-    ILogger<Program> logger) =>
+    CustomerCollectionService collectionService) =>
 {
     var name = request.Name?.Trim();
     if (string.IsNullOrEmpty(name))
@@ -711,8 +890,9 @@ app.MapPost("/api/customers", async (
 
     // Immediate one-time collection attempt — failure is non-fatal (e.g. the
     // customer's admin hasn't granted consent yet); the customer is saved
-    // either way and collection can be retried from Settings.
-    await CollectCustomerDataAsync(customer, db, graphClient, exoClient, dnsClient, sccClient, logger, collectionLocks);
+    // either way and collection can be retried from Settings, or picked up
+    // automatically by the next CustomerSyncBackgroundService run.
+    await collectionService.CollectAsync(customer);
 
     return Results.Created($"/api/customers/{customer.Id}", new
     {
@@ -730,11 +910,7 @@ app.MapPost("/api/customers", async (
 app.MapPost("/api/customers/{id:int}/collect", async (
     int id,
     SpectraDbContext db,
-    GraphAppClient graphClient,
-    ExoPowerShellClient exoClient,
-    DnsCheckClient dnsClient,
-    SccPowerShellClient sccClient,
-    ILogger<Program> logger) =>
+    CustomerCollectionService collectionService) =>
 {
     var customer = await db.Customers.FindAsync(id);
     if (customer is null)
@@ -742,7 +918,7 @@ app.MapPost("/api/customers/{id:int}/collect", async (
         return Results.NotFound();
     }
 
-    await CollectCustomerDataAsync(customer, db, graphClient, exoClient, dnsClient, sccClient, logger, collectionLocks);
+    await collectionService.CollectAsync(customer);
 
     return Results.Ok(new
     {
@@ -993,11 +1169,21 @@ app.MapPost("/api/settings/database/provision", async (
                 ExoRemoteDomainsJson = c.ExoRemoteDomainsJson,
                 ExoMailboxAuditBypassJson = c.ExoMailboxAuditBypassJson,
                 ExoMailboxForwardingJson = c.ExoMailboxForwardingJson,
+                ExoMailboxPermissionsJson = c.ExoMailboxPermissionsJson,
+                ExoRecipientPermissionsJson = c.ExoRecipientPermissionsJson,
                 SccLastCollectedAt = c.SccLastCollectedAt,
                 SccLastError = c.SccLastError,
                 SccDlpPoliciesJson = c.SccDlpPoliciesJson,
                 SccRetentionPoliciesJson = c.SccRetentionPoliciesJson,
                 SccAlertPoliciesJson = c.SccAlertPoliciesJson,
+                AzureSubscriptionsJson = c.AzureSubscriptionsJson,
+                AzureVirtualMachinesJson = c.AzureVirtualMachinesJson,
+                AzureAppServicesJson = c.AzureAppServicesJson,
+                AzureLastCollectedAt = c.AzureLastCollectedAt,
+                AzureLastError = c.AzureLastError,
+                AzureReservationsJson = c.AzureReservationsJson,
+                EntraAppRegistrationsJson = c.EntraAppRegistrationsJson,
+                EntraServicePrincipalsJson = c.EntraServicePrincipalsJson,
                 CreatedAt = c.CreatedAt,
                 CreatedByEmail = c.CreatedByEmail,
             }).ToList();
@@ -1027,6 +1213,7 @@ app.MapPost("/api/settings/database/provision", async (
                     HasArchiveMailbox = u.HasArchiveMailbox,
                     LicensesJson = u.LicensesJson,
                     MfaJson = u.MfaJson,
+                    AliasesJson = u.AliasesJson,
                     ForwardingRulesJson = u.ForwardingRulesJson,
                     InboxRulesJson = u.InboxRulesJson,
                     SyncedAt = u.SyncedAt,
@@ -1062,6 +1249,42 @@ app.MapPost("/api/settings/database/provision", async (
         logger.LogError(ex, "Failed to provision {DatabaseType} database {Host}:{Port}/{Database}", config.DatabaseType, config.Host, config.Port, config.DatabaseName);
         return Results.Problem($"Failed to provision the database: {ex.Message}", statusCode: 500);
     }
+}).RequireAuthorization("AdminOnly");
+
+// Settings -> Updates panel. See AppUpdateService.cs for the full flow —
+// this endpoint never performs an update itself, only reports what a
+// root-owned process (deploy/install.sh / deploy/update.sh) has recorded.
+app.MapGet("/api/settings/update-status", async (AppUpdateService updateService) =>
+{
+    var currentVersion = updateService.ReadCurrentVersion();
+    var status = updateService.ReadRunStatus();
+
+    string? latestCommit = null;
+    bool? updateAvailable = null;
+    if (updateService.IsConfigured && currentVersion is not null)
+    {
+        latestCommit = await updateService.GetLatestRemoteCommitAsync();
+        if (latestCommit is not null)
+        {
+            updateAvailable = !string.Equals(latestCommit, currentVersion.Commit, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    return Results.Ok(new { currentVersion, updateAvailable, latestCommit, status });
+}).RequireAuthorization("AdminOnly");
+
+// Never performs the update inline — only writes the request flag a
+// separate systemd .path unit watches for (see AppUpdateService.RequestUpdate
+// and the README). The backend process never gains any elevated privilege.
+app.MapPost("/api/settings/update", (ClaimsPrincipal user, AppUpdateService updateService) =>
+{
+    var email = user.FindFirstValue(ClaimTypes.Upn) ?? user.FindFirstValue("preferred_username") ?? "";
+    var (queued, error) = updateService.RequestUpdate(email);
+    if (!queued)
+    {
+        return Results.Json(new { error }, statusCode: StatusCodes.Status409Conflict);
+    }
+    return Results.Json(new { queued = true }, statusCode: StatusCodes.Status202Accepted);
 }).RequireAuthorization("AdminOnly");
 
 app.Run();
@@ -1145,12 +1368,22 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("ExoRemoteDomainsJson", "LONGTEXT NULL"),
             ("ExoMailboxAuditBypassJson", "LONGTEXT NULL"),
             ("ExoMailboxForwardingJson", "LONGTEXT NULL"),
+            ("ExoMailboxPermissionsJson", "LONGTEXT NULL"),
+            ("ExoRecipientPermissionsJson", "LONGTEXT NULL"),
             ("MailboxDataConcealed", "TINYINT(1) NOT NULL DEFAULT 0"),
             ("SccLastCollectedAt", "DATETIME(6) NULL"),
             ("SccLastError", "LONGTEXT NULL"),
             ("SccDlpPoliciesJson", "LONGTEXT NULL"),
             ("SccRetentionPoliciesJson", "LONGTEXT NULL"),
             ("SccAlertPoliciesJson", "LONGTEXT NULL"),
+            ("AzureSubscriptionsJson", "LONGTEXT NULL"),
+            ("AzureVirtualMachinesJson", "LONGTEXT NULL"),
+            ("AzureAppServicesJson", "LONGTEXT NULL"),
+            ("AzureLastCollectedAt", "DATETIME(6) NULL"),
+            ("AzureLastError", "LONGTEXT NULL"),
+            ("AzureReservationsJson", "LONGTEXT NULL"),
+            ("EntraAppRegistrationsJson", "LONGTEXT NULL"),
+            ("EntraServicePrincipalsJson", "LONGTEXT NULL"),
         })
         {
             if (!await ColumnExistsAsync("Customers", column))
@@ -1178,6 +1411,7 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
                 HasArchiveMailbox TINYINT(1) NULL,
                 LicensesJson LONGTEXT NULL,
                 MfaJson LONGTEXT NULL,
+                AliasesJson LONGTEXT NULL,
                 ForwardingRulesJson LONGTEXT NULL,
                 InboxRulesJson LONGTEXT NULL,
                 SyncedAt DATETIME(6) NOT NULL,
@@ -1195,6 +1429,7 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("HasArchiveMailbox", "TINYINT(1) NULL"),
             ("LicensesJson", "LONGTEXT NULL"),
             ("MfaJson", "LONGTEXT NULL"),
+            ("AliasesJson", "LONGTEXT NULL"),
             ("ForwardingRulesJson", "LONGTEXT NULL"),
             ("InboxRulesJson", "LONGTEXT NULL"),
         })
@@ -1247,12 +1482,22 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("ExoRemoteDomainsJson", "nvarchar(max) NULL"),
             ("ExoMailboxAuditBypassJson", "nvarchar(max) NULL"),
             ("ExoMailboxForwardingJson", "nvarchar(max) NULL"),
+            ("ExoMailboxPermissionsJson", "nvarchar(max) NULL"),
+            ("ExoRecipientPermissionsJson", "nvarchar(max) NULL"),
             ("MailboxDataConcealed", "bit NOT NULL DEFAULT 0"),
             ("SccLastCollectedAt", "datetimeoffset NULL"),
             ("SccLastError", "nvarchar(max) NULL"),
             ("SccDlpPoliciesJson", "nvarchar(max) NULL"),
             ("SccRetentionPoliciesJson", "nvarchar(max) NULL"),
             ("SccAlertPoliciesJson", "nvarchar(max) NULL"),
+            ("AzureSubscriptionsJson", "nvarchar(max) NULL"),
+            ("AzureVirtualMachinesJson", "nvarchar(max) NULL"),
+            ("AzureAppServicesJson", "nvarchar(max) NULL"),
+            ("AzureLastCollectedAt", "datetimeoffset NULL"),
+            ("AzureLastError", "nvarchar(max) NULL"),
+            ("AzureReservationsJson", "nvarchar(max) NULL"),
+            ("EntraAppRegistrationsJson", "nvarchar(max) NULL"),
+            ("EntraServicePrincipalsJson", "nvarchar(max) NULL"),
         })
         {
 #pragma warning disable EF1002
@@ -1279,6 +1524,7 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
                 HasArchiveMailbox bit NULL,
                 LicensesJson nvarchar(max) NULL,
                 MfaJson nvarchar(max) NULL,
+                AliasesJson nvarchar(max) NULL,
                 ForwardingRulesJson nvarchar(max) NULL,
                 InboxRulesJson nvarchar(max) NULL,
                 SyncedAt datetimeoffset NOT NULL,
@@ -1296,6 +1542,7 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("HasArchiveMailbox", "bit NULL"),
             ("LicensesJson", "nvarchar(max) NULL"),
             ("MfaJson", "nvarchar(max) NULL"),
+            ("AliasesJson", "nvarchar(max) NULL"),
             ("ForwardingRulesJson", "nvarchar(max) NULL"),
             ("InboxRulesJson", "nvarchar(max) NULL"),
         })
@@ -1308,401 +1555,6 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
         }
     }
 }
-
-// Pulls the current user list (plus licenses and, if permitted, mailbox
-// usage) from a customer's tenant via Graph and replaces whatever was
-// previously stored for them. A hard failure here (e.g. consent not granted
-// yet) is recorded on the customer rather than thrown, so it can be retried
-// later. Mailbox usage specifically needs a separate Reports.Read.All
-// permission on top of the User.Read.All everything else uses — its own
-// failure doesn't block users/licenses from still being collected, since
-// tenants may not have granted it yet (see README).
-static async Task CollectCustomerDataAsync(
-    Customer customer,
-    SpectraDbContext db,
-    GraphAppClient graphClient,
-    ExoPowerShellClient exoClient,
-    DnsCheckClient dnsClient,
-    SccPowerShellClient sccClient,
-    ILogger logger,
-    ConcurrentDictionary<int, SemaphoreSlim> collectionLocks)
-{
-    var gate = collectionLocks.GetOrAdd(customer.Id, _ => new SemaphoreSlim(1, 1));
-    await gate.WaitAsync();
-    try
-    {
-        var graphUsers = await graphClient.ListUsersAsync(customer.TenantId);
-        var token = await graphClient.GetAppTokenAsync(customer.TenantId);
-
-        var licensesByUserId = new Dictionary<string, List<GraphLicenseDto>>();
-        await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (u, ct) =>
-        {
-            try
-            {
-                var licenses = await graphClient.GetLicenseDetailsAsync(customer.TenantId, u.Id, token, ct);
-                lock (licensesByUserId) licensesByUserId[u.Id] = licenses;
-            }
-            catch (Exception ex)
-            {
-                // Best-effort per user — one odd account (e.g. a resource
-                // mailbox Graph won't return licenseDetails for) shouldn't
-                // sink the rest of the tenant's collection.
-                logger.LogWarning(ex, "Failed to get license details for {UserId} in tenant {TenantId}", u.Id, customer.TenantId);
-            }
-        });
-
-        var warnings = new List<string>();
-
-        Dictionary<string, GraphMailboxUsageDto> mailboxByUpn = new(StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            mailboxByUpn = await graphClient.GetMailboxUsageByUpnAsync(customer.TenantId, token);
-
-            // Real rows came back, but none of them match any actual user in
-            // this tenant — the signature of Microsoft's default report
-            // concealment (see Customer.MailboxDataConcealed), not a
-            // permission problem. Only evaluate this when there's at least
-            // one real user to check against, so a brand-new/empty tenant
-            // doesn't get misdiagnosed.
-            customer.MailboxDataConcealed = mailboxByUpn.Count > 0
-                && graphUsers.Count > 0
-                && !graphUsers.Any(u => mailboxByUpn.ContainsKey(u.UserPrincipalName));
-            if (customer.MailboxDataConcealed)
-            {
-                warnings.Add("mailbox data unavailable — report identities are concealed (Microsoft 365 admin center → Settings → Org Settings → Services → Reports → check \"Display Concealed user, group, and site names in all reports\" → Save; takes a few minutes to take effect, then re-collect)");
-            }
-        }
-        catch (GraphPermissionDeniedException ex)
-        {
-            logger.LogWarning(ex, "Reports.Read.All not yet effective for tenant {TenantId}", customer.TenantId);
-            warnings.Add("mailbox data unavailable — Reports.Read.All isn't granted yet");
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to get mailbox usage for tenant {TenantId}", customer.TenantId);
-            // Not a permission problem — don't tell the admin to re-consent when
-            // that isn't the actual fix; show Graph's own explanation instead.
-            warnings.Add($"mailbox data unavailable — {ex.Message}");
-        }
-
-        var mfaByUserId = new Dictionary<string, GraphMfaDto>();
-        var mfaPermissionDenied = false;
-        await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (u, ct) =>
-        {
-            try
-            {
-                var mfa = await graphClient.GetAuthenticationMethodsAsync(customer.TenantId, u.Id, token, ct);
-                lock (mfaByUserId) mfaByUserId[u.Id] = mfa;
-            }
-            catch (GraphPermissionDeniedException)
-            {
-                mfaPermissionDenied = true;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to get authentication methods for {UserId} in tenant {TenantId}", u.Id, customer.TenantId);
-            }
-        });
-        if (mfaPermissionDenied)
-        {
-            warnings.Add("MFA data unavailable — UserAuthenticationMethod.Read.All isn't granted yet");
-        }
-
-        try
-        {
-            var policies = await graphClient.GetConditionalAccessPoliciesAsync(customer.TenantId, token);
-            customer.ConditionalAccessPoliciesJson = JsonSerializer.Serialize(policies);
-        }
-        catch (GraphPermissionDeniedException ex)
-        {
-            logger.LogWarning(ex, "Policy.Read.All not granted for tenant {TenantId}", customer.TenantId);
-            warnings.Add("Conditional Access data unavailable — Policy.Read.All isn't granted yet");
-            customer.ConditionalAccessPoliciesJson = null;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to get Conditional Access policies for tenant {TenantId}", customer.TenantId);
-            warnings.Add($"Conditional Access data unavailable — {ex.Message}");
-            customer.ConditionalAccessPoliciesJson = null;
-        }
-
-        try
-        {
-            var globalAdmins = await graphClient.GetGlobalAdministratorsAsync(customer.TenantId, token);
-            customer.GlobalAdminsJson = JsonSerializer.Serialize(globalAdmins);
-        }
-        catch (GraphPermissionDeniedException ex)
-        {
-            logger.LogWarning(ex, "RoleManagement.ReadWrite.Directory not granted for tenant {TenantId}", customer.TenantId);
-            warnings.Add("Global Administrator data unavailable — RoleManagement.ReadWrite.Directory isn't granted yet");
-            customer.GlobalAdminsJson = null;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to get Global Administrators for tenant {TenantId}", customer.TenantId);
-            warnings.Add($"Global Administrator data unavailable — {ex.Message}");
-            customer.GlobalAdminsJson = null;
-        }
-
-        try
-        {
-            customer.SecurityDefaultsEnabled = await graphClient.GetSecurityDefaultsEnabledAsync(customer.TenantId, token);
-        }
-        catch (GraphPermissionDeniedException ex)
-        {
-            logger.LogWarning(ex, "Policy.Read.All not granted (Security Defaults) for tenant {TenantId}", customer.TenantId);
-            customer.SecurityDefaultsEnabled = null;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to get Security Defaults status for tenant {TenantId}", customer.TenantId);
-            customer.SecurityDefaultsEnabled = null;
-        }
-
-        // SPF/DMARC DNS checks — live public DNS lookups, not Graph or EXO,
-        // so the only real failure mode here is "couldn't resolve the
-        // verified domain list", not a missing permission.
-        try
-        {
-            var verifiedDomains = await graphClient.GetVerifiedDomainsAsync(customer.TenantId, token);
-            var domainChecks = await Task.WhenAll(verifiedDomains.Select(d => dnsClient.CheckDomainAsync(d)));
-            customer.DnsRecordChecksJson = JsonSerializer.Serialize(domainChecks);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to run SPF/DMARC DNS checks for tenant {TenantId}", customer.TenantId);
-            warnings.Add($"DNS record checks unavailable — {ex.Message}");
-            customer.DnsRecordChecksJson = null;
-        }
-
-        try
-        {
-            var secureScore = await graphClient.GetSecureScoreAsync(customer.TenantId, token);
-            customer.SecureScoreJson = secureScore is null ? null : JsonSerializer.Serialize(secureScore);
-        }
-        catch (GraphPermissionDeniedException ex)
-        {
-            logger.LogWarning(ex, "SecurityEvents.Read.All not granted for tenant {TenantId}", customer.TenantId);
-            warnings.Add("Secure Score unavailable — SecurityEvents.Read.All isn't granted yet");
-            customer.SecureScoreJson = null;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to get Secure Score for tenant {TenantId}", customer.TenantId);
-            warnings.Add($"Secure Score unavailable — {ex.Message}");
-            customer.SecureScoreJson = null;
-        }
-
-        try
-        {
-            var profiles = await graphClient.GetSecureScoreControlProfilesAsync(customer.TenantId, token);
-            customer.SecureScoreControlProfilesJson = JsonSerializer.Serialize(profiles);
-        }
-        catch (GraphPermissionDeniedException ex)
-        {
-            logger.LogWarning(ex, "SecurityEvents.Read.All not granted (control profiles) for tenant {TenantId}", customer.TenantId);
-            customer.SecureScoreControlProfilesJson = null;
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to get Secure Score control profiles for tenant {TenantId}", customer.TenantId);
-            customer.SecureScoreControlProfilesJson = null;
-        }
-
-        var inboxRulesByUserId = new Dictionary<string, List<GraphInboxRuleDto>>();
-        var inboxRulesPermissionDenied = false;
-        await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (u, ct) =>
-        {
-            try
-            {
-                Console.WriteLine($"DEBUG inbox rules lookup: {u.UserPrincipalName} ({u.Id})");
-                var rules = await graphClient.GetInboxRulesAsync(customer.TenantId, u.Id, token, ct);
-                lock (inboxRulesByUserId) inboxRulesByUserId[u.Id] = rules;
-            }
-            catch (GraphPermissionDeniedException)
-            {
-                inboxRulesPermissionDenied = true;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to get inbox rules for {UserId} in tenant {TenantId}", u.Id, customer.TenantId);
-            }
-        });
-        if (inboxRulesPermissionDenied)
-        {
-            warnings.Add("inbox rule data unavailable — MailboxSettings.Read isn't granted yet");
-        }
-
-        // Exchange Online PowerShell data — a separate collection track from
-        // everything above, needing its own access grant (Global Reader,
-        // auto-assigned here) rather than Graph admin consent. Attempted on
-        // every run until the role assignment succeeds, since it can lag
-        // behind (or fail independently of) ConsentGranted.
-        if (!customer.ExoRoleAssigned)
-        {
-            try
-            {
-                customer.ExoRoleAssigned = await graphClient.EnsureGlobalReaderRoleAssignedAsync(customer.TenantId, token);
-            }
-            catch (GraphPermissionDeniedException ex)
-            {
-                logger.LogWarning(ex, "RoleManagement.ReadWrite.Directory not granted for tenant {TenantId}", customer.TenantId);
-                warnings.Add("Exchange Online access setup unavailable — RoleManagement.ReadWrite.Directory isn't granted yet");
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to assign Global Reader role for tenant {TenantId}", customer.TenantId);
-                warnings.Add($"Exchange Online role assignment failed — {ex.Message}");
-            }
-        }
-
-        if (customer.ExoRoleAssigned)
-        {
-            string? organizationDomain = null;
-            try
-            {
-                organizationDomain = await graphClient.GetInitialDomainAsync(customer.TenantId, token)
-                    ?? throw new InvalidOperationException("Couldn't resolve the tenant's initial domain.");
-
-                var exo = await exoClient.CollectAsync(organizationDomain);
-                customer.ExoOrganizationConfigJson = exo.OrganizationConfig is null ? null : JsonSerializer.Serialize(exo.OrganizationConfig);
-                customer.ExoAcceptedDomainsJson = exo.AcceptedDomains is null ? null : JsonSerializer.Serialize(exo.AcceptedDomains);
-                customer.ExoAntiPhishPoliciesJson = exo.AntiPhishPolicies is null ? null : JsonSerializer.Serialize(exo.AntiPhishPolicies);
-                customer.ExoSafeLinksPoliciesJson = exo.SafeLinksPolicies is null ? null : JsonSerializer.Serialize(exo.SafeLinksPolicies);
-                customer.ExoSafeAttachmentPoliciesJson = exo.SafeAttachmentPolicies is null ? null : JsonSerializer.Serialize(exo.SafeAttachmentPolicies);
-                customer.ExoHostedContentFilterPoliciesJson = exo.HostedContentFilterPolicies is null ? null : JsonSerializer.Serialize(exo.HostedContentFilterPolicies);
-                customer.ExoHostedOutboundSpamFilterPoliciesJson = exo.HostedOutboundSpamFilterPolicies is null ? null : JsonSerializer.Serialize(exo.HostedOutboundSpamFilterPolicies);
-                customer.ExoMalwareFilterPoliciesJson = exo.MalwareFilterPolicies is null ? null : JsonSerializer.Serialize(exo.MalwareFilterPolicies);
-                customer.ExoDkimSigningConfigsJson = exo.DkimSigningConfigs is null ? null : JsonSerializer.Serialize(exo.DkimSigningConfigs);
-                customer.ExoTransportRulesJson = exo.TransportRules is null ? null : JsonSerializer.Serialize(exo.TransportRules);
-                customer.ExoSharingPoliciesJson = exo.SharingPolicies is null ? null : JsonSerializer.Serialize(exo.SharingPolicies);
-                customer.ExoHostedConnectionFilterPoliciesJson = exo.HostedConnectionFilterPolicies is null ? null : JsonSerializer.Serialize(exo.HostedConnectionFilterPolicies);
-                customer.ExoAdminAuditLogConfigJson = exo.AdminAuditLogConfig is null ? null : JsonSerializer.Serialize(exo.AdminAuditLogConfig);
-                customer.ExoAtpPolicyForO365Json = exo.AtpPolicyForO365 is null ? null : JsonSerializer.Serialize(exo.AtpPolicyForO365);
-                customer.ExoRemoteDomainsJson = exo.RemoteDomains is null ? null : JsonSerializer.Serialize(exo.RemoteDomains);
-                customer.ExoMailboxAuditBypassJson = exo.MailboxAuditBypass is null ? null : JsonSerializer.Serialize(exo.MailboxAuditBypass);
-                customer.ExoMailboxForwardingJson = exo.MailboxForwarding is null ? null : JsonSerializer.Serialize(exo.MailboxForwarding);
-                customer.ExoLastCollectedAt = DateTimeOffset.UtcNow;
-                customer.ExoLastError = null;
-            }
-            catch (ExoAccessException ex)
-            {
-                // Deliberately NOT nulling the 11 Exo*Json columns here (see
-                // the doc comment on Customer.ExoLastError) — EXO PowerShell
-                // is meaningfully flakier than a Graph HTTP call (external
-                // process, cert auth, role-propagation delay that can take
-                // ~15 minutes even right after a successful assignment
-                // above), and wiping previously-good check results on a
-                // transient failure would make a working integration look
-                // broken instead of just stale.
-                logger.LogWarning(ex, "Exchange Online access not yet effective for tenant {TenantId}", customer.TenantId);
-                warnings.Add($"Exchange Online checks unavailable — {ex.Message}");
-                customer.ExoLastError = ex.Message;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Exchange Online collection failed for tenant {TenantId}", customer.TenantId);
-                warnings.Add($"Exchange Online checks failed — {ex.Message}");
-                customer.ExoLastError = ex.Message;
-            }
-
-            // A separate PowerShell session (Connect-IPPSSession) from the EXO
-            // one above — attempted independently as long as the tenant domain
-            // resolved, regardless of whether the EXO collection itself
-            // succeeded, since a failure in one session shouldn't block the
-            // other from running.
-            if (organizationDomain is not null)
-            {
-                try
-                {
-                    var scc = await sccClient.CollectAsync(organizationDomain);
-                    customer.SccDlpPoliciesJson = scc.DlpPolicies is null ? null : JsonSerializer.Serialize(scc.DlpPolicies);
-                    customer.SccRetentionPoliciesJson = scc.RetentionPolicies is null ? null : JsonSerializer.Serialize(scc.RetentionPolicies);
-                    customer.SccAlertPoliciesJson = scc.AlertPolicies is null ? null : JsonSerializer.Serialize(scc.AlertPolicies);
-                    customer.SccLastCollectedAt = DateTimeOffset.UtcNow;
-                    customer.SccLastError = null;
-                }
-                catch (SccAccessException ex)
-                {
-                    logger.LogWarning(ex, "Security & Compliance access not yet effective for tenant {TenantId}", customer.TenantId);
-                    warnings.Add($"Security & Compliance checks unavailable — {ex.Message}");
-                    customer.SccLastError = ex.Message;
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Security & Compliance collection failed for tenant {TenantId}", customer.TenantId);
-                    warnings.Add($"Security & Compliance checks failed — {ex.Message}");
-                    customer.SccLastError = ex.Message;
-                }
-            }
-        }
-
-        var existing = await db.CustomerUsers.Where(u => u.CustomerId == customer.Id).ToListAsync();
-        db.CustomerUsers.RemoveRange(existing);
-
-        var now = DateTimeOffset.UtcNow;
-        db.CustomerUsers.AddRange(graphUsers.Select(u =>
-        {
-            var mailbox = mailboxByUpn.GetValueOrDefault(u.UserPrincipalName);
-            var mfa = mfaByUserId.GetValueOrDefault(u.Id);
-            return new CustomerUser
-            {
-                CustomerId = customer.Id,
-                GraphUserId = u.Id,
-                DisplayName = u.DisplayName,
-                Mail = u.Mail,
-                UserPrincipalName = u.UserPrincipalName,
-                JobTitle = u.JobTitle,
-                Department = u.Department,
-                OfficeLocation = u.OfficeLocation,
-                AccountEnabled = u.AccountEnabled,
-                CreatedDateTime = u.CreatedDateTime,
-                MailboxSizeBytes = mailbox?.SizeBytes,
-                MailboxItemCount = mailbox?.ItemCount,
-                HasArchiveMailbox = mailbox?.HasArchive,
-                LicensesJson = licensesByUserId.TryGetValue(u.Id, out var licenses) ? SerializeLicenses(licenses) : null,
-                MfaJson = mfa is null ? null : JsonSerializer.Serialize(mfa),
-                InboxRulesJson = inboxRulesByUserId.TryGetValue(u.Id, out var inboxRules) ? JsonSerializer.Serialize(inboxRules) : null,
-                ForwardingRulesJson = inboxRulesByUserId.TryGetValue(u.Id, out var allRules)
-                    ? JsonSerializer.Serialize(allRules
-                        .Where(r => r.ForwardsTo.Count > 0)
-                        .Select(r => new GraphForwardingRuleDto(r.Name, r.Enabled, r.ForwardsTo)))
-                    : null,
-                SyncedAt = now,
-            };
-        }));
-
-        customer.ConsentGranted = true;
-        customer.LastSyncedAt = now;
-        customer.LastSyncError = warnings.Count == 0
-            ? null
-            : $"Users and licenses synced, but some data is unavailable: {string.Join("; ", warnings)}.";
-    }
-    catch (Exception ex)
-    {
-        logger.LogWarning(ex, "Failed to collect data for customer {CustomerId} ({TenantId})", customer.Id, customer.TenantId);
-        customer.LastSyncError = ex.Message;
-    }
-
-    try
-    {
-        await db.SaveChangesAsync();
-    }
-    catch (Exception ex)
-    {
-        // The per-customer lock above should make this unreachable in
-        // practice — kept as a backstop so any other save failure still
-        // surfaces as a normal API error instead of an unhandled 500.
-        logger.LogError(ex, "Failed to save collected data for customer {CustomerId}", customer.Id);
-    }
-    finally
-    {
-        gate.Release();
-    }
-}
-
-static string SerializeLicenses(List<GraphLicenseDto> licenses) =>
-    JsonSerializer.Serialize(licenses.Select(l => new { l.SkuId, l.SkuPartNumber }));
 
 static List<object> DeserializeLicenses(string? licensesJson)
 {

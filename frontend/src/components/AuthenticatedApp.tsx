@@ -6,12 +6,13 @@ import AppLayout from "./AppLayout";
 import Overview from "./Overview";
 import Users from "./Users";
 import Security from "./Security";
+import Azure from "./Azure";
 import PlaceholderPage from "./PlaceholderPage";
 import Settings from "./Settings";
 import DatabaseSetupScreen from "./DatabaseSetupScreen";
 import { UserProvider } from "../UserContext";
 import { CustomerProvider } from "../CustomerContext";
-import { AzureIcon, IntuneIcon } from "../icons";
+import { IntuneIcon } from "../icons";
 
 export default function AuthenticatedApp() {
   const { instance } = useMsal();
@@ -55,10 +56,7 @@ export default function AuthenticatedApp() {
                   />
                 }
               />
-              <Route
-                path="/azure"
-                element={<PlaceholderPage title="Azure" tagline="Resources and subscriptions." icon={AzureIcon} />}
-              />
+              <Route path="/azure" element={<Azure />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Spectra.Api.Data;
 
@@ -10,9 +11,11 @@ using Spectra.Api.Data;
 namespace Spectra.Api.Migrations
 {
     [DbContext(typeof(SpectraDbContext))]
-    partial class SpectraDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260728173128_AddAliasesAndMailboxAccess")]
+    partial class AddAliasesAndMailboxAccess
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "8.0.29");
@@ -78,24 +81,6 @@ namespace Spectra.Api.Migrations
                         .ValueGeneratedOnAdd()
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("AzureAppServicesJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTimeOffset?>("AzureLastCollectedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AzureLastError")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AzureReservationsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AzureSubscriptionsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("AzureVirtualMachinesJson")
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("ConditionalAccessPoliciesJson")
                         .HasColumnType("TEXT");
 
@@ -110,12 +95,6 @@ namespace Spectra.Api.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("DnsRecordChecksJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("EntraAppRegistrationsJson")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("EntraServicePrincipalsJson")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("ExoAcceptedDomainsJson")

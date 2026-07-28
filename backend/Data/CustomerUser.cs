@@ -39,6 +39,12 @@ public class CustomerUser
     // collected/permission missing, same convention as the mailbox fields.
     public string? MfaJson { get; set; }
 
+    // Array of {Address, IsPrimary} parsed from Graph's proxyAddresses
+    // (User.Read.All, already granted — no new permission). IsPrimary
+    // reflects the uppercase "SMTP:" vs lowercase "smtp:" prefix Graph uses
+    // to distinguish the primary address from secondary aliases.
+    public string? AliasesJson { get; set; }
+
     // Array of {Name, Enabled, ForwardsTo} — just the inbox rules that
     // auto-forward or redirect mail, the classic BEC/phishing persistence
     // indicator. Derived from InboxRulesJson below at collection time so the

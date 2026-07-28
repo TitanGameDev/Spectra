@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMsal } from "@azure/msal-react";
-import { getCustomerUsers, type CustomerUser } from "../api";
+import { getCustomerUsers, downloadCustomerUserReport, type CustomerUser } from "../api";
 import { useCustomer } from "../CustomerContext";
 import { SortableHeader, sortRows, toggleSort, type SortState, type SortValue } from "../sorting";
 
@@ -15,6 +15,7 @@ type SubTabKey = (typeof SUB_TABS)[number]["key"];
 const DIRECTORY_ACCESSORS: Record<string, (u: CustomerUser) => SortValue> = {
   name: (u) => u.displayName ?? "",
   email: (u) => u.mail ?? u.userPrincipalName,
+  aliases: (u) => u.aliases.filter((a) => !a.isPrimary).length,
   jobTitle: (u) => u.jobTitle ?? "",
   department: (u) => u.department ?? "",
   office: (u) => u.officeLocation ?? "",
@@ -60,8 +61,23 @@ export default function Users() {
   const [query, setQuery] = useState("");
   const [subTab, setSubTab] = useState<SubTabKey>("directory");
   const [sort, setSort] = useState<SortState<string> | null>(null);
+  const [downloadingReport, setDownloadingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
 
   const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
+
+  const handleDownloadReport = async () => {
+    if (!selectedCustomerId || !selectedCustomer) return;
+    setDownloadingReport(true);
+    setReportError(null);
+    try {
+      await downloadCustomerUserReport(instance, selectedCustomerId, selectedCustomer.name);
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : "Failed to generate report");
+    } finally {
+      setDownloadingReport(false);
+    }
+  };
 
   useEffect(() => {
     if (!selectedCustomerId) {
@@ -111,10 +127,18 @@ export default function Users() {
 
   return (
     <>
-      <div className="dashboard-intro">
-        <h1>Users</h1>
-        <p>{selectedCustomer ? `The people at ${selectedCustomer.name}.` : "The people at your selected customer."}</p>
+      <div className="dashboard-intro settings-panel-header">
+        <div>
+          <h1>Users</h1>
+          <p>{selectedCustomer ? `The people at ${selectedCustomer.name}.` : "The people at your selected customer."}</p>
+        </div>
+        {selectedCustomerId && (
+          <button className="btn btn-primary btn-sm" onClick={handleDownloadReport} disabled={downloadingReport}>
+            {downloadingReport ? "Generating…" : "Download Report"}
+          </button>
+        )}
       </div>
+      {reportError && <p className="login-error">{reportError}</p>}
 
       {!customersLoading && customers.length === 0 ? (
         <div className="panel-empty">
@@ -182,6 +206,7 @@ export default function Users() {
                         <tr>
                           <SortableHeader label="Name" columnKey="name" sort={sort} onSort={handleSort} />
                           <SortableHeader label="Email" columnKey="email" sort={sort} onSort={handleSort} />
+                          <SortableHeader label="Aliases" columnKey="aliases" sort={sort} onSort={handleSort} />
                           <SortableHeader label="Job title" columnKey="jobTitle" sort={sort} onSort={handleSort} />
                           <SortableHeader label="Department" columnKey="department" sort={sort} onSort={handleSort} />
                           <SortableHeader label="Office" columnKey="office" sort={sort} onSort={handleSort} />
@@ -190,22 +215,26 @@ export default function Users() {
                         </tr>
                       </thead>
                       <tbody>
-                        {sortedUsers.map((user) => (
-                          <tr key={user.id}>
-                            <td>{user.displayName ?? "—"}</td>
-                            <td>{user.mail ?? user.userPrincipalName}</td>
-                            <td>{user.jobTitle ?? "—"}</td>
-                            <td>{user.department ?? "—"}</td>
-                            <td>{user.officeLocation ?? "—"}</td>
-                            <td>
-                              <span
-                                className={`status-dot status-dot-${user.accountEnabled ? "connected" : "error"}`}
-                              />
-                              {user.accountEnabled ? "Enabled" : "Disabled"}
-                            </td>
-                            <td>{user.createdDateTime ? new Date(user.createdDateTime).toLocaleDateString() : "—"}</td>
-                          </tr>
-                        ))}
+                        {sortedUsers.map((user) => {
+                          const aliases = user.aliases.filter((a) => !a.isPrimary);
+                          return (
+                            <tr key={user.id}>
+                              <td>{user.displayName ?? "—"}</td>
+                              <td>{user.mail ?? user.userPrincipalName}</td>
+                              <td>{aliases.length > 0 ? aliases.map((a) => a.address).join(", ") : "—"}</td>
+                              <td>{user.jobTitle ?? "—"}</td>
+                              <td>{user.department ?? "—"}</td>
+                              <td>{user.officeLocation ?? "—"}</td>
+                              <td>
+                                <span
+                                  className={`status-dot status-dot-${user.accountEnabled ? "connected" : "error"}`}
+                                />
+                                {user.accountEnabled ? "Enabled" : "Disabled"}
+                              </td>
+                              <td>{user.createdDateTime ? new Date(user.createdDateTime).toLocaleDateString() : "—"}</td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </>
                   )}

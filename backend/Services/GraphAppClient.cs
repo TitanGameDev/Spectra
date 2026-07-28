@@ -12,7 +12,13 @@ public record GraphUserDto(
     string? Department,
     string? OfficeLocation,
     bool AccountEnabled,
-    DateTimeOffset? CreatedDateTime);
+    DateTimeOffset? CreatedDateTime,
+    // Raw proxyAddresses entries, e.g. "SMTP:primary@contoso.com" (uppercase
+    // prefix = primary), "smtp:alias@contoso.com" (lowercase = secondary
+    // alias) — parsed into a friendlier shape in Program.cs, kept raw here
+    // since that's exactly what Graph returns and needs no interpretation
+    // at this layer.
+    List<string> ProxyAddresses);
 
 public record GraphLicenseDto(string SkuId, string SkuPartNumber);
 
@@ -64,6 +70,31 @@ public record GraphSecureScoreControlProfileDto(
     bool Deprecated);
 
 public record GraphForwardingRuleDto(string Name, bool Enabled, List<string> ForwardsTo);
+
+// An Entra app registration — the definition of an app, owned by this
+// tenant. SoonestCredentialExpiry is the minimum endDateTime across every
+// password and certificate credential on the app (whichever comes first),
+// null if it has none; a useful at-a-glance flag for a stale/soon-to-break
+// integration, same idea as the EXO certificate expiry banner elsewhere.
+public record GraphApplicationDto(
+    string Id,
+    string AppId,
+    string? DisplayName,
+    string? SignInAudience,
+    DateTimeOffset? CreatedDateTime,
+    DateTimeOffset? SoonestCredentialExpiry);
+
+// An Entra service principal — the "instance" of an app in this tenant,
+// covering both apps registered here (App Registrations) and third-party/
+// gallery apps consented into this tenant (Enterprise Applications). The two
+// lists overlap for locally-registered apps but are shown as separate
+// sections since that's how the Entra portal itself presents them.
+public record GraphServicePrincipalDto(
+    string Id,
+    string AppId,
+    string? DisplayName,
+    string? ServicePrincipalType,
+    DateTimeOffset? CreatedDateTime);
 
 public record GraphInboxRuleDto(
     string Name,
@@ -125,7 +156,7 @@ public class GraphAppClient(HttpClient httpClient, IConfiguration configuration)
 
         var users = new List<GraphUserDto>();
         string? url =
-            "https://graph.microsoft.com/v1.0/users?$select=id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation,accountEnabled,createdDateTime&$top=999";
+            "https://graph.microsoft.com/v1.0/users?$select=id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation,accountEnabled,createdDateTime,proxyAddresses&$top=999";
 
         while (url is not null)
         {
@@ -154,7 +185,8 @@ public class GraphAppClient(HttpClient httpClient, IConfiguration configuration)
                         GetOptionalString(item, "department"),
                         GetOptionalString(item, "officeLocation"),
                         item.TryGetProperty("accountEnabled", out var ae) && ae.ValueKind == JsonValueKind.True,
-                        GetOptionalDateTimeOffset(item, "createdDateTime")));
+                        GetOptionalDateTimeOffset(item, "createdDateTime"),
+                        GetStringArray(item, "proxyAddresses")));
                 }
             }
 
@@ -481,7 +513,8 @@ public class GraphAppClient(HttpClient httpClient, IConfiguration configuration)
                     GetOptionalString(item, "department"),
                     GetOptionalString(item, "officeLocation"),
                     item.TryGetProperty("accountEnabled", out var ae) && ae.ValueKind == JsonValueKind.True,
-                    GetOptionalDateTimeOffset(item, "createdDateTime")));
+                    GetOptionalDateTimeOffset(item, "createdDateTime"),
+                    ProxyAddresses: []));
             }
         }
 
@@ -774,6 +807,89 @@ public class GraphAppClient(HttpClient httpClient, IConfiguration configuration)
         }
 
         return result;
+    }
+
+    // App registrations owned by this tenant — needs Application.Read.All
+    // (application permission), a new Graph permission on top of everything
+    // else this class uses, so existing customers need to re-grant consent
+    // (Settings → Customers → Grant consent) before this starts returning data.
+    public async Task<List<GraphApplicationDto>> ListApplicationsAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        var apps = new List<GraphApplicationDto>();
+        string? url = "https://graph.microsoft.com/v1.0/applications?$select=id,appId,displayName,signInAudience,createdDateTime,passwordCredentials,keyCredentials&$top=999";
+
+        while (url is not null)
+        {
+            using var doc = await GetGraphJsonAsync(url, token, "Graph /applications request", ct);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("value", out var valueArray))
+            {
+                foreach (var item in valueArray.EnumerateArray())
+                {
+                    apps.Add(new GraphApplicationDto(
+                        item.GetProperty("id").GetString()!,
+                        GetOptionalString(item, "appId") ?? "",
+                        GetOptionalString(item, "displayName"),
+                        GetOptionalString(item, "signInAudience"),
+                        GetOptionalDateTimeOffset(item, "createdDateTime"),
+                        GetSoonestCredentialExpiry(item)));
+                }
+            }
+            url = root.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+        }
+
+        return apps;
+    }
+
+    // Enterprise Applications — every service principal in this tenant,
+    // including third-party/gallery apps consented in by an admin, not just
+    // ones registered here. Same Application.Read.All permission as
+    // ListApplicationsAsync above.
+    public async Task<List<GraphServicePrincipalDto>> ListServicePrincipalsAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        var servicePrincipals = new List<GraphServicePrincipalDto>();
+        string? url = "https://graph.microsoft.com/v1.0/servicePrincipals?$select=id,appId,displayName,servicePrincipalType,createdDateTime&$top=999";
+
+        while (url is not null)
+        {
+            using var doc = await GetGraphJsonAsync(url, token, "Graph /servicePrincipals request", ct);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("value", out var valueArray))
+            {
+                foreach (var item in valueArray.EnumerateArray())
+                {
+                    servicePrincipals.Add(new GraphServicePrincipalDto(
+                        item.GetProperty("id").GetString()!,
+                        GetOptionalString(item, "appId") ?? "",
+                        GetOptionalString(item, "displayName"),
+                        GetOptionalString(item, "servicePrincipalType"),
+                        GetOptionalDateTimeOffset(item, "createdDateTime")));
+                }
+            }
+            url = root.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+        }
+
+        return servicePrincipals;
+    }
+
+    private static DateTimeOffset? GetSoonestCredentialExpiry(JsonElement item)
+    {
+        DateTimeOffset? soonest = null;
+        foreach (var arrayName in new[] { "passwordCredentials", "keyCredentials" })
+        {
+            if (item.TryGetProperty(arrayName, out var creds) && creds.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var cred in creds.EnumerateArray())
+                {
+                    var expiry = GetOptionalDateTimeOffset(cred, "endDateTime");
+                    if (expiry is not null && (soonest is null || expiry < soonest))
+                    {
+                        soonest = expiry;
+                    }
+                }
+            }
+        }
+        return soonest;
     }
 
     // Decodes a claim straight out of a JWT's payload segment without

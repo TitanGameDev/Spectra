@@ -7,6 +7,7 @@ import {
   getCustomerIdentitySecurity,
   getCustomerDomainSecurity,
   getCustomerComplianceSecurity,
+  downloadCustomerReport,
   getExoCertificateStatus,
   type CustomerUser,
   type CustomerUserInboxRule,
@@ -18,6 +19,8 @@ import {
   type DomainSecurityInfo,
   type ComplianceSecurityInfo,
   type ExoTransportRule,
+  type ExoMailboxPermission,
+  type ExoRecipientPermission,
   type OrcaCheckResult,
   type ExoCertificateStatus,
 } from "../api";
@@ -88,6 +91,19 @@ const MAIL_FLOW_RULE_ACCESSORS: Record<string, (r: ExoTransportRule) => SortValu
   deleteMessage: (r) => r.deleteMessage ?? false,
 };
 
+const MAILBOX_PERMISSION_ACCESSORS: Record<string, (p: ExoMailboxPermission) => SortValue> = {
+  mailbox: (p) => p.identity ?? "",
+  user: (p) => p.user ?? "",
+  accessRights: (p) => (p.accessRights ?? []).join(", "),
+  deny: (p) => p.deny ?? false,
+};
+
+const RECIPIENT_PERMISSION_ACCESSORS: Record<string, (p: ExoRecipientPermission) => SortValue> = {
+  mailbox: (p) => p.identity ?? "",
+  trustee: (p) => p.trustee ?? "",
+  accessRights: (p) => (p.accessRights ?? []).join(", "),
+};
+
 // Shared by every OrcaCheckResult-shaped table (Email Security, Identity).
 const CHECK_ACCESSORS: Record<string, (c: OrcaCheckResult) => SortValue> = {
   check: (c) => c.title,
@@ -103,6 +119,7 @@ const SUB_TABS = [
   { key: "forwarding", label: "Forwarding Rules" },
   { key: "exchange-rules", label: "Exchange Rules" },
   { key: "mail-flow-rules", label: "Mail Flow Rules" },
+  { key: "mailbox-access", label: "Mailbox Access" },
   { key: "email-security", label: "Email Security" },
   { key: "identity", label: "Identity" },
   { key: "domains", label: "Domains" },
@@ -374,6 +391,8 @@ export default function Security() {
   const [certStatus, setCertStatus] = useState<ExoCertificateStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [downloadingReport, setDownloadingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
   const [subTab, setSubTab] = useState<SubTabKey>("overview");
   const [expandedPolicy, setExpandedPolicy] = useState<string | null>(null);
   const [expandedControl, setExpandedControl] = useState<string | null>(null);
@@ -479,12 +498,33 @@ export default function Security() {
   const exchangeRuleRows: InboxRuleRow[] = users?.flatMap((user) => user.inboxRules.map((rule) => ({ user, rule }))) ?? [];
   const handleSort = (key: string) => setSort((prev) => toggleSort(prev, key));
 
+  const handleDownloadReport = async () => {
+    if (!selectedCustomerId || !selectedCustomer) return;
+    setDownloadingReport(true);
+    setReportError(null);
+    try {
+      await downloadCustomerReport(instance, selectedCustomerId, selectedCustomer.name);
+    } catch (err) {
+      setReportError(err instanceof Error ? err.message : "Failed to generate report");
+    } finally {
+      setDownloadingReport(false);
+    }
+  };
+
   return (
     <>
-      <div className="dashboard-intro">
-        <h1>Security</h1>
-        <p>{selectedCustomer ? `Security posture for ${selectedCustomer.name}.` : "Security posture for your selected customer."}</p>
+      <div className="dashboard-intro settings-panel-header">
+        <div>
+          <h1>Security</h1>
+          <p>{selectedCustomer ? `Security posture for ${selectedCustomer.name}.` : "Security posture for your selected customer."}</p>
+        </div>
+        {selectedCustomerId && (
+          <button className="btn btn-primary btn-sm" onClick={handleDownloadReport} disabled={downloadingReport}>
+            {downloadingReport ? "Generating…" : "Download Report"}
+          </button>
+        )}
       </div>
+      {reportError && <p className="login-error">{reportError}</p>}
 
       {!customersLoading && customers.length === 0 ? (
         <div className="panel-empty">
@@ -918,6 +958,74 @@ export default function Security() {
                               <td>{rule.priority ?? "—"}</td>
                               <td>{rule.description ?? "—"}</td>
                               <td>{rule.deleteMessage ? "Yes" : "No"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {subTab === "mailbox-access" && (
+                <>
+                  <h3 className="subsection-heading">Full Access</h3>
+                  {(emailSecurity?.mailboxPermissions.length ?? 0) === 0 ? (
+                    <div className="panel-empty">
+                      <p>
+                        No delegate Full Access grants found for this customer, or Exchange Online checks haven't
+                        collected yet — see the Email Security tab.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="data-table-wrap">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <SortableHeader label="Mailbox" columnKey="mailbox" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Granted to" columnKey="user" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Access rights" columnKey="accessRights" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Denied" columnKey="deny" sort={sort} onSort={handleSort} />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sortRows(emailSecurity?.mailboxPermissions ?? [], sort, MAILBOX_PERMISSION_ACCESSORS).map((p, i) => (
+                            <tr key={`${p.identity}-${p.user}-${i}`}>
+                              <td>{p.identity ?? "—"}</td>
+                              <td>{p.user ?? "—"}</td>
+                              <td>{(p.accessRights ?? []).join(", ") || "—"}</td>
+                              <td>{p.deny ? "Yes" : "No"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  <h3 className="subsection-heading">Send As</h3>
+                  {(emailSecurity?.recipientPermissions.length ?? 0) === 0 ? (
+                    <div className="panel-empty">
+                      <p>
+                        No delegate Send As grants found for this customer, or Exchange Online checks haven't
+                        collected yet — see the Email Security tab.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="data-table-wrap">
+                      <table className="data-table">
+                        <thead>
+                          <tr>
+                            <SortableHeader label="Mailbox" columnKey="mailbox" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Granted to" columnKey="trustee" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Access rights" columnKey="accessRights" sort={sort} onSort={handleSort} />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {sortRows(emailSecurity?.recipientPermissions ?? [], sort, RECIPIENT_PERMISSION_ACCESSORS).map((p, i) => (
+                            <tr key={`${p.identity}-${p.trustee}-${i}`}>
+                              <td>{p.identity ?? "—"}</td>
+                              <td>{p.trustee ?? "—"}</td>
+                              <td>{(p.accessRights ?? []).join(", ") || "—"}</td>
                             </tr>
                           ))}
                         </tbody>

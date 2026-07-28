@@ -113,6 +113,14 @@ public class Customer
     // sourced mechanism). Only forwarding mailboxes are collected, so this
     // is normally a short list.
     public string? ExoMailboxForwardingJson { get; set; }
+    // Full Access (and other) delegate grants on any mailbox — who besides
+    // the owner can open it. NT AUTHORITY\SELF and inherited entries are
+    // filtered out at collection time, so a null/empty value means "no
+    // delegate access found", not "not collected yet" (same convention as
+    // ExoMailboxForwardingJson).
+    public string? ExoMailboxPermissionsJson { get; set; }
+    // Send As grants — a different permission from mailbox access above.
+    public string? ExoRecipientPermissionsJson { get; set; }
 
     // Microsoft Purview (Security & Compliance) data — a sibling collection
     // track to the EXO PowerShell data above, via a separate PowerShell
@@ -124,6 +132,42 @@ public class Customer
     public string? SccDlpPoliciesJson { get; set; }
     public string? SccRetentionPoliciesJson { get; set; }
     public string? SccAlertPoliciesJson { get; set; }
+
+    // Azure Resource Manager data — architecturally different from
+    // everything above: Graph/EXO/SCC all flow through Entra admin consent,
+    // but ARM authorizes purely by Azure RBAC role assignment on a
+    // subscription/resource, with no admin-consent screen involved at all.
+    // The customer's Azure admin has to separately assign the Reader role to
+    // Spectra's app (already present in their tenant as a service principal
+    // once they've done the ordinary Graph consent step) via Access Control
+    // (IAM) on their subscription(s) — see README. Only subscriptions the
+    // app actually has a role on come back here, so an empty/null value
+    // almost always means "Reader hasn't been assigned yet", not "no
+    // subscriptions exist".
+    public string? AzureSubscriptionsJson { get; set; }
+    public string? AzureVirtualMachinesJson { get; set; }
+    public string? AzureAppServicesJson { get; set; }
+    public DateTimeOffset? AzureLastCollectedAt { get; set; }
+    public string? AzureLastError { get; set; }
+
+    // Reserved Instances / savings plans — needs a second, separate,
+    // higher-privilege role (Reservations Reader) assigned at the *tenant
+    // root* via a completely different Azure Portal screen (Home →
+    // Reservations → Role assignment) than the subscription-scoped Reader
+    // role above. A bigger, rarer ask for a customer's admin, so this
+    // degrades independently — null means either never collected or that
+    // role specifically isn't granted, same convention as ExoRoleAssigned
+    // gating the EXO PowerShell columns above.
+    public string? AzureReservationsJson { get; set; }
+
+    // Entra App Registrations and Enterprise Applications — Graph-sourced
+    // (not ARM), needs Application.Read.All, a genuinely new Graph
+    // application permission on top of everything else. Existing customers
+    // need to re-grant consent (Settings → Customers → Grant consent) before
+    // this starts returning data, same as any other new permission added
+    // mid-project.
+    public string? EntraAppRegistrationsJson { get; set; }
+    public string? EntraServicePrincipalsJson { get; set; }
 
     public DateTimeOffset CreatedAt { get; set; }
     public required string CreatedByEmail { get; set; }

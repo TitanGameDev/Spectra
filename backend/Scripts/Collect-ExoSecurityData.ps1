@@ -42,6 +42,8 @@ $result = [ordered]@{
     RemoteDomains                    = $null
     MailboxAuditBypass               = $null
     MailboxForwarding                = $null
+    MailboxPermissions               = $null
+    RecipientPermissions             = $null
 }
 
 try {
@@ -91,6 +93,32 @@ try {
             @{Name='ForwardingAddress'; Expression={ if ($_.ForwardingAddress) { $_.ForwardingAddress.ToString() } else { $null } }}, `
             @{Name='ForwardingSmtpAddress'; Expression={ if ($_.ForwardingSmtpAddress) { $_.ForwardingSmtpAddress.ToString() } else { $null } }}, `
             DeliverToMailboxAndForward)
+    } catch { }
+    # Full Access (and other) delegate grants — Get-EXOMailboxPermission with
+    # no -Identity returns every mailbox's permissions in one call rather
+    # than needing to iterate mailboxes one at a time. NT AUTHORITY\SELF
+    # (every mailbox's default grant to its own owner) and inherited entries
+    # are filtered out here so what's left is only genuine, explicitly
+    # granted delegate access — the kind of thing worth a client noticing.
+    try {
+        $result.MailboxPermissions = @(Get-EXOMailboxPermission -ResultSize Unlimited |
+            Where-Object { -not $_.IsInherited -and $_.User.ToString() -ne 'NT AUTHORITY\SELF' } |
+            Select-Object `
+                Identity, `
+                @{Name='User'; Expression={ $_.User.ToString() }}, `
+                @{Name='AccessRights'; Expression={ @($_.AccessRights | ForEach-Object { $_.ToString() }) }}, `
+                Deny)
+    } catch { }
+    # Send As grants — same one-call-for-everything shape as
+    # Get-EXOMailboxPermission above, via the EXO-native cmdlet Microsoft
+    # recommends over the older Get-RecipientPermission for Exchange Online.
+    try {
+        $result.RecipientPermissions = @(Get-EXORecipientPermission -ResultSize Unlimited |
+            Where-Object { $_.Trustee.ToString() -ne 'NT AUTHORITY\SELF' } |
+            Select-Object `
+                Identity, `
+                @{Name='Trustee'; Expression={ $_.Trustee.ToString() }}, `
+                @{Name='AccessRights'; Expression={ @($_.AccessRights | ForEach-Object { $_.ToString() }) }})
     } catch { }
 }
 finally {
