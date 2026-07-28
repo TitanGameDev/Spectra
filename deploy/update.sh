@@ -94,6 +94,10 @@ log "Building the frontend..."
 ( cd "$SPECTRA_SRC_DIR/frontend" && npm ci --silent && npm run build --silent )
 rm -rf "${SPECTRA_WEB_ROOT:?}"/*
 cp -r "$SPECTRA_SRC_DIR/frontend/dist/." "$SPECTRA_WEB_ROOT/"
+# See the matching comment in install.sh's build_frontend — nginx needs this
+# world-readable/traversable regardless of root's umask, or it 403s.
+chmod 755 "$(dirname "$SPECTRA_WEB_ROOT")" "$SPECTRA_WEB_ROOT"
+chmod -R o+rX "$SPECTRA_WEB_ROOT"
 
 write_version
 
