@@ -9,7 +9,8 @@
 #   - Node.js LTS (to build the frontend)
 #   - MySQL Server, with a dedicated database + user created for Spectra
 #   - nginx, configured from deploy/nginx/spectra.conf as a reverse proxy
-#   - certbot, to issue a Let's Encrypt certificate (optional)
+#   - certbot, to issue a Let's Encrypt certificate (optional; supports
+#     domains proxied through Cloudflare via a DNS-01 challenge)
 #   - a systemd service running the backend as a non-root user
 #   - ufw firewall rules limited to 22/80/443 (optional)
 #
@@ -57,6 +58,17 @@ SPECTRA_DOMAIN="${SPECTRA_DOMAIN:-}"
 SPECTRA_SETUP_TLS="${SPECTRA_SETUP_TLS:-}"          # yes/no
 SPECTRA_SETUP_FIREWALL="${SPECTRA_SETUP_FIREWALL:-}" # yes/no
 
+# Only relevant when SPECTRA_SETUP_TLS=yes. Set this if the domain is
+# proxied through Cloudflare (orange-cloud) — the standard HTTP-01 challenge
+# certbot's --nginx plugin uses can't work in that setup (Let's Encrypt's
+# validator hits Cloudflare's edge, not this server, and gets nothing to
+# check), so a DNS-01 challenge via the Cloudflare API is used instead.
+SPECTRA_USE_CLOUDFLARE_DNS="${SPECTRA_USE_CLOUDFLARE_DNS:-}" # yes/no
+# Cloudflare API token, scoped to Zone:DNS:Edit for this domain only (create
+# one at https://dash.cloudflare.com/profile/api-tokens — not the legacy
+# global API key, which has far more blast radius than this needs).
+SPECTRA_CLOUDFLARE_API_TOKEN="${SPECTRA_CLOUDFLARE_API_TOKEN:-}"
+
 SPECTRA_MYSQL_DB="${SPECTRA_MYSQL_DB:-spectra}"
 SPECTRA_MYSQL_USER="${SPECTRA_MYSQL_USER:-spectra}"
 
@@ -96,6 +108,23 @@ prompt() {
   else
     warn "No terminal attached to prompt for '$__msg' — using default '$__default'. Set \$$__var to override."
     printf -v "$__var" '%s' "$__default"
+  fi
+}
+
+# Same as prompt() but for values that shouldn't echo to the terminal or
+# end up in shell history (API tokens, etc.) — read -s instead of read -r.
+prompt_secret() {
+  local __var="$1" __msg="$2" __answer
+  if [ -n "${!__var:-}" ]; then
+    return 0
+  fi
+  if [ -r /dev/tty ]; then
+    read -rs -p "$__msg: " __answer < /dev/tty
+    echo
+    printf -v "$__var" '%s' "$__answer"
+  else
+    warn "No terminal attached to prompt for '$__msg' — leaving blank. Set \$$__var to provide it non-interactively."
+    printf -v "$__var" ''
   fi
 }
 
@@ -230,6 +259,7 @@ Username: ${SPECTRA_MYSQL_USER}
 Password: ${SPECTRA_MYSQL_PASSWORD}
 EOF
     chmod 600 "$SPECTRA_CONFIG_DIR/mysql-credentials.txt"
+    umask 022
     log "MySQL credentials written to $SPECTRA_CONFIG_DIR/mysql-credentials.txt (root-only, mode 600)."
   fi
 }
@@ -364,6 +394,7 @@ Update__SrcDir=${SPECTRA_SRC_DIR}
 EOF
   chmod 600 "$SPECTRA_CONFIG_DIR/backend.env"
   chown root:root "$SPECTRA_CONFIG_DIR/backend.env"
+  umask 022
 }
 
 write_systemd_unit() {
@@ -472,6 +503,12 @@ EOF
 
 setup_certbot() {
   [ "$SPECTRA_SETUP_TLS" = "yes" ] || { log "Skipping certbot (SPECTRA_SETUP_TLS != yes) — serving plain HTTP. Re-run with SPECTRA_SETUP_TLS=yes once DNS is ready."; return 0; }
+
+  if [ "$SPECTRA_USE_CLOUDFLARE_DNS" = "yes" ]; then
+    setup_certbot_cloudflare_dns
+    return 0
+  fi
+
   log "Installing certbot and requesting a certificate for ${SPECTRA_DOMAIN}..."
   apt-get install -y -qq certbot python3-certbot-nginx
   warn "certbot needs ${SPECTRA_DOMAIN} to already resolve to this server's public IP over port 80 — if it doesn't yet, this step will fail; fix DNS and re-run with SPECTRA_SETUP_TLS=yes."
@@ -479,6 +516,107 @@ setup_certbot() {
   # 443/ssl server block with the new cert and, via --redirect, turns the
   # existing port-80 block into a redirect to it. Also adds HSTS itself.
   certbot --nginx -d "$SPECTRA_DOMAIN" --non-interactive --agree-tos -m "admin@${SPECTRA_DOMAIN}" --redirect
+}
+
+# Standard HTTP-01 (the `certbot --nginx` path above) needs Let's Encrypt's
+# own validator to reach this server directly on port 80 — that breaks the
+# moment the domain is proxied through Cloudflare (orange-cloud), since the
+# validation request hits Cloudflare's edge, not this box, and Cloudflare
+# has nothing to answer the challenge with. A DNS-01 challenge sidesteps
+# this entirely — it proves domain ownership via a TXT record instead of an
+# HTTP request, so it works regardless of proxy state, and (unlike the
+# HTTP-01 + temporarily-disable-the-proxy workaround some guides suggest)
+# certbot's renewal timer keeps working completely unattended afterwards,
+# with the proxy left on the whole time.
+setup_certbot_cloudflare_dns() {
+  log "Installing certbot's Cloudflare DNS plugin and requesting a certificate for ${SPECTRA_DOMAIN}..."
+  apt-get install -y -qq certbot python3-certbot-dns-cloudflare
+
+  local cred_file="/etc/letsencrypt/cloudflare.ini"
+  mkdir -p /etc/letsencrypt
+  umask 077
+  cat > "$cred_file" <<EOF
+dns_cloudflare_api_token = ${SPECTRA_CLOUDFLARE_API_TOKEN}
+EOF
+  chmod 600 "$cred_file"
+  umask 022
+
+  # certonly (not --nginx) just obtains the cert — it deliberately doesn't
+  # touch nginx config at all, since the --nginx plugin's HTTP-01 auto-config
+  # assumptions don't apply here. write_tls_nginx_config below does that part.
+  certbot certonly --dns-cloudflare --dns-cloudflare-credentials "$cred_file" \
+    --dns-cloudflare-propagation-seconds 30 \
+    -d "$SPECTRA_DOMAIN" --non-interactive --agree-tos -m "admin@${SPECTRA_DOMAIN}"
+
+  write_tls_nginx_config
+  nginx -t
+  systemctl reload nginx
+
+  warn "Certificate issued. Now go to your Cloudflare dashboard -> SSL/TLS -> Overview and set the encryption mode to \"Full\" or \"Full (strict)\" — it was likely on \"Flexible\", or \"Full\" was failing before this cert existed. Until you do, Cloudflare will keep refusing to connect to this origin over HTTPS."
+}
+
+# Only used by the Cloudflare DNS-01 path above — certbot's --nginx plugin
+# (the non-Cloudflare path in setup_certbot) edits nginx's config itself;
+# `certbot certonly` deliberately doesn't, so this writes the TLS server
+# block ourselves once the certificate files exist. Same shape as
+# deploy/nginx/spectra.conf, just generated rather than sed'd from a
+# template, and pointed at certbot's own cert paths instead of placeholders.
+write_tls_nginx_config() {
+  local cert_dir="/etc/letsencrypt/live/${SPECTRA_DOMAIN}"
+  [ -f "$cert_dir/fullchain.pem" ] || die "Expected $cert_dir/fullchain.pem to exist after certbot ran — something went wrong."
+
+  cat > /etc/nginx/sites-available/spectra.conf <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name ${SPECTRA_DOMAIN};
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${SPECTRA_DOMAIN};
+
+    ssl_certificate     ${cert_dir}/fullchain.pem;
+    ssl_certificate_key ${cert_dir}/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Permissions-Policy "geolocation=(), microphone=(), camera=()" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; font-src 'self'; connect-src 'self' https://login.microsoftonline.com https://graph.microsoft.com; frame-src https://login.microsoftonline.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'" always;
+
+    root ${SPECTRA_WEB_ROOT};
+    index index.html;
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+
+    location = /index.html {
+        add_header Cache-Control "no-cache";
+    }
+
+    location /assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable";
+    }
+
+    location /api/ {
+        limit_req zone=api_zone burst=20 nodelay;
+
+        proxy_pass http://127.0.0.1:5080;
+        proxy_http_version 1.1;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
 }
 
 setup_firewall() {
@@ -532,6 +670,13 @@ main() {
   prompt SPECTRA_DOMAIN "Domain this app will be served from (e.g. spectra.example.com)"
   [ -n "$SPECTRA_DOMAIN" ] || die "A domain is required (nginx/certbot need it) — set SPECTRA_DOMAIN or answer the prompt."
   prompt SPECTRA_SETUP_TLS "Set up HTTPS now via Let's Encrypt? DNS for $SPECTRA_DOMAIN must already point here (yes/no)" "no"
+  if [ "$SPECTRA_SETUP_TLS" = "yes" ]; then
+    prompt SPECTRA_USE_CLOUDFLARE_DNS "Is $SPECTRA_DOMAIN proxied through Cloudflare (orange-cloud)? The standard HTTP challenge can't work through that, so we'll use a DNS challenge via the Cloudflare API instead (yes/no)" "no"
+    if [ "$SPECTRA_USE_CLOUDFLARE_DNS" = "yes" ]; then
+      prompt_secret SPECTRA_CLOUDFLARE_API_TOKEN "Cloudflare API token (Zone:DNS:Edit, scoped to this domain — create one at https://dash.cloudflare.com/profile/api-tokens)"
+      [ -n "$SPECTRA_CLOUDFLARE_API_TOKEN" ] || die "A Cloudflare API token is required for the DNS challenge (or answer 'no' above to use the standard HTTP challenge instead, if the domain isn't actually proxied)."
+    fi
+  fi
   prompt SPECTRA_SETUP_FIREWALL "Configure ufw to only allow SSH/80/443? (yes/no)" "no"
   prompt AZURE_TENANT_ID "Azure AD tenant ID (blank to fill in later)" ""
   prompt AZURE_BACKEND_CLIENT_ID "Azure AD backend app registration client ID (blank to fill in later)" ""
