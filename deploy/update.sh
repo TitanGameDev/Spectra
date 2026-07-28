@@ -32,6 +32,20 @@ REQUEST_FLAG="$SPECTRA_DATA_DIR/update-requested"
 
 log() { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 
+# Same helper as install.sh's ensure_world_traversable — walks every
+# ancestor directory of $1 up to "/" adding o+rx, so nginx's unprivileged
+# www-data worker can traverse into the web root regardless of what umask
+# was in effect (or what an ancestor directory's existing permissions were)
+# when it was created. Only ever adds permissions, never removes.
+ensure_world_traversable() {
+  local dir
+  dir="$(cd "$1" && pwd)"
+  while [ "$dir" != "/" ]; do
+    chmod o+rx "$dir"
+    dir="$(dirname "$dir")"
+  done
+}
+
 # A JSON string value is only ever one of: a fixed literal ("running" etc), an
 # ISO-8601 timestamp, or command output that might contain quotes/newlines
 # (a build failure's error text) — escape defensively rather than assume.
@@ -94,9 +108,7 @@ log "Building the frontend..."
 ( cd "$SPECTRA_SRC_DIR/frontend" && npm ci --silent && npm run build --silent )
 rm -rf "${SPECTRA_WEB_ROOT:?}"/*
 cp -r "$SPECTRA_SRC_DIR/frontend/dist/." "$SPECTRA_WEB_ROOT/"
-# See the matching comment in install.sh's build_frontend — nginx needs this
-# world-readable/traversable regardless of root's umask, or it 403s.
-chmod 755 "$(dirname "$SPECTRA_WEB_ROOT")" "$SPECTRA_WEB_ROOT"
+ensure_world_traversable "$SPECTRA_WEB_ROOT"
 chmod -R o+rX "$SPECTRA_WEB_ROOT"
 
 write_version

@@ -113,6 +113,24 @@ random_password() {
   openssl rand -base64 24 | tr -dc 'A-Za-z0-9' | head -c 24
 }
 
+# nginx serves the web root as its own unprivileged worker user (www-data),
+# not root — mkdir/cp as root only end up readable by that user if root's
+# umask happens to allow it at every level of the path, which isn't
+# guaranteed (seen in practice: /var/www itself coming out 700 on a hardened
+# image, one level above the web root itself, which a chmod of just the web
+# root and its immediate parent doesn't reach). Walks every ancestor
+# directory up to "/" adding o+rx — only ever adds permissions, never
+# removes, and directories that are already fine (almost always true above
+# whatever this script itself created) are a harmless no-op.
+ensure_world_traversable() {
+  local dir
+  dir="$(cd "$1" && pwd)"
+  while [ "$dir" != "/" ]; do
+    chmod o+rx "$dir"
+    dir="$(dirname "$dir")"
+  done
+}
+
 # ---------------------------------------------------------------------------
 # Steps
 # ---------------------------------------------------------------------------
@@ -312,12 +330,7 @@ EOF
   ( cd "$SPECTRA_SRC_DIR/frontend" && npm ci --silent && npm run build --silent )
   rm -rf "${SPECTRA_WEB_ROOT:?}"/*
   cp -r "$SPECTRA_SRC_DIR/frontend/dist/." "$SPECTRA_WEB_ROOT/"
-  # nginx serves this as its own unprivileged worker user (www-data), not
-  # root — mkdir/cp above only end up world-readable if root's umask happens
-  # to allow it, which isn't guaranteed (some hardened cloud images default
-  # to a much stricter umask). Without this, nginx gets EACCES trying to
-  # read index.html and serves a bare 403 with no indication why.
-  chmod 755 "$(dirname "$SPECTRA_WEB_ROOT")" "$SPECTRA_WEB_ROOT"
+  ensure_world_traversable "$SPECTRA_WEB_ROOT"
   chmod -R o+rX "$SPECTRA_WEB_ROOT"
 }
 
