@@ -4,7 +4,7 @@
     {
       "name": "frontend",
       "runtimeExecutable": "/bin/bash",
-      "runtimeArgs": ["/Users/rhys/RiderProjects/Spectra/frontend/dev.sh"],
+      "runtimeArgs": ["frontend/dev.sh"],
       "port": 5173
     }
   ]
