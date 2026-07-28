@@ -5,10 +5,10 @@
 For a fresh Ubuntu/Debian server, [`deploy/install.sh`](deploy/install.sh) automates the entire "Production hardening" checklist further down this doc end to end — it's the fast path; that checklist is still the reference for what it's actually doing and for any other distro.
 
 ```bash
-curl -fsSL https://<wherever-you-host-this-file>/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/TitanGameDev/Spectra/main/deploy/install.sh | sudo bash
 ```
 
-There's no public URL for it baked in — this is an internal tool on a private repo, so host the raw file wherever makes sense for you (an internal web server, a gist, S3 with restricted access) rather than a plain public GitHub raw link. If you'd rather not fetch-and-pipe at all, cloning the repo and running `sudo bash deploy/install.sh` from inside it works identically (it detects it's already sitting in a checkout).
+If you'd rather not fetch-and-pipe at all, cloning the repo and running `sudo bash deploy/install.sh` from inside it works identically (it detects it's already sitting in a checkout) — useful if you want to read the script first, which is generally good practice before piping anything into `sudo bash`.
 
 **What it does**: installs the .NET 8 SDK, Node.js, MySQL Server, nginx, and (optionally) certbot; builds and publishes both the backend and frontend; creates a dedicated `spectra` system user and a `spectra.service` systemd unit (`Restart=on-failure`, hardened with `ProtectSystem=strict`/`NoNewPrivileges`); provisions an empty MySQL database + user for Spectra and writes the generated credentials to `/etc/spectra/mysql-credentials.txt` (root-only); and configures nginx from the same template as [`deploy/nginx/spectra.conf`](deploy/nginx/spectra.conf).
 
