@@ -14,14 +14,19 @@
 # create app registrations and grant admin consent (Application
 # Administrator, Cloud Application Administrator, or Global Administrator).
 #
-# Ends by printing a ready-to-run install.sh command line with every value
-# filled in — copy it onto the target server (or paste it straight into an
-# SSH session) to finish the deploy.
+# Ends by either POSTing the result straight to your running Spectra instance
+# (set SPECTRA_INSTANCE_URL — it'll ask for the setup token install.sh
+# generated), or printing the values to paste into the setup wizard at your
+# instance's URL yourself. Either way, install.sh itself no longer takes any
+# Azure AD values at all — see the README's "Azure AD (Entra ID) setup".
 set -euo pipefail
 
 SPECTRA_APP_NAME="${SPECTRA_APP_NAME:-Spectra}"
 SPECTRA_DOMAIN="${SPECTRA_DOMAIN:-}"
 SPECTRA_LOCAL_DEV_URL="${SPECTRA_LOCAL_DEV_URL:-http://localhost:5173}"
+SPECTRA_INSTANCE_URL="${SPECTRA_INSTANCE_URL:-}"
+SPECTRA_SETUP_TOKEN="${SPECTRA_SETUP_TOKEN:-}"
+SPECTRA_POSTED="no"
 
 GRAPH_SP_APP_ID="00000003-0000-0000-c000-000000000000"
 EXO_SP_APP_ID="00000002-0000-0ff1-ce00-000000000000"
@@ -43,6 +48,19 @@ prompt() {
   else
     warn "No terminal attached to prompt for '$__msg' — using default '$__default'. Set \$$__var to override."
     printf -v "$__var" '%s' "$__default"
+  fi
+}
+
+prompt_secret() {
+  local __var="$1" __msg="$2" __answer
+  if [ -n "${!__var:-}" ]; then return 0; fi
+  if [ -r /dev/tty ]; then
+    read -rs -p "$__msg: " __answer < /dev/tty
+    echo
+    printf -v "$__var" '%s' "$__answer"
+  else
+    warn "No terminal attached to prompt for '$__msg' — leaving blank. Set \$$__var to provide it non-interactively."
+    printf -v "$__var" ''
   fi
 }
 
@@ -280,36 +298,52 @@ print(json.dumps({"requiredResourceAccess": resource_access}))
   rm -f /tmp/spectra-consent-err
 }
 
-write_local_env_files() {
-  [ -f "frontend/.env.example" ] && [ -f "backend/.env.example" ] || return 0
-  prompt SPECTRA_WRITE_LOCAL_ENV "Found a Spectra checkout here — write frontend/.env and backend/.env for local dev too? (yes/no)" "yes"
-  [ "$SPECTRA_WRITE_LOCAL_ENV" = "yes" ] || return 0
+# POSTs the collected values straight to a running Spectra instance's
+# /api/setup/azure-ad, using the same one-time token install.sh generated —
+# skips copy-pasting into the web wizard entirely. Never hard-fails: any
+# outcome here just falls through to print_summary, which always prints the
+# raw values too, so a failed POST never loses information you need.
+post_config_to_instance() {
+  [ -n "$SPECTRA_INSTANCE_URL" ] || return 0
+  log "Posting Azure AD configuration to ${SPECTRA_INSTANCE_URL}..."
 
-  if [ ! -f frontend/.env ]; then
-    cat > frontend/.env <<EOF
-VITE_MSAL_CLIENT_ID=${FRONTEND_APP_ID}
-VITE_MSAL_TENANT_ID=${AZURE_TENANT_ID}
-VITE_MSAL_REDIRECT_URI=${SPECTRA_LOCAL_DEV_URL}
-VITE_API_BASE_URL=http://localhost:5080
-VITE_API_SCOPE=${AZURE_API_SCOPE}
-EOF
-    log "Wrote frontend/.env"
-  else
-    warn "frontend/.env already exists — not overwriting. Values: VITE_MSAL_CLIENT_ID=${FRONTEND_APP_ID} VITE_MSAL_TENANT_ID=${AZURE_TENANT_ID} VITE_API_SCOPE=${AZURE_API_SCOPE}"
-  fi
+  python3 -c '
+import json, sys
+body = {
+    "setupToken": sys.argv[1],
+    "tenantId": sys.argv[2],
+    "frontendClientId": sys.argv[3],
+    "backendClientId": sys.argv[4],
+    "backendClientSecret": sys.argv[5],
+    "apiScope": sys.argv[6],
+}
+print(json.dumps(body))
+' "$SPECTRA_SETUP_TOKEN" "$AZURE_TENANT_ID" "$FRONTEND_APP_ID" "$BACKEND_APP_ID" "$AZURE_BACKEND_CLIENT_SECRET" "$AZURE_API_SCOPE" > /tmp/spectra-setup-post.json
 
-  if [ ! -f backend/.env ]; then
-    cat > backend/.env <<EOF
-AzureAd__Instance=https://login.microsoftonline.com/
-AzureAd__TenantId=${AZURE_TENANT_ID}
-AzureAd__ClientId=${BACKEND_APP_ID}
-AzureAd__ClientSecret=${AZURE_BACKEND_CLIENT_SECRET}
-Cors__AllowedOrigin=${SPECTRA_LOCAL_DEV_URL}
-EOF
-    log "Wrote backend/.env"
-  else
-    warn "backend/.env already exists — not overwriting. Backend client ID: ${BACKEND_APP_ID}"
-  fi
+  local http_code
+  http_code="$(curl -sS -o /tmp/spectra-setup-response.json -w '%{http_code}' -X POST "${SPECTRA_INSTANCE_URL%/}/api/setup/azure-ad" \
+    -H 'Content-Type: application/json' --data @/tmp/spectra-setup-post.json 2>/dev/null || echo "000")"
+
+  case "$http_code" in
+    200)
+      log "Configured successfully — the server is restarting to apply it."
+      SPECTRA_POSTED="yes"
+      ;;
+    409)
+      warn "That instance is already configured. Sign in and use Settings -> Authentication if you need to change it."
+      ;;
+    401)
+      warn "The setup token was rejected — check setup-token.txt on the target server."
+      ;;
+    000)
+      warn "Couldn't reach ${SPECTRA_INSTANCE_URL} — check the URL and that the server is up."
+      ;;
+    *)
+      warn "Unexpected response ($http_code): $(cat /tmp/spectra-setup-response.json 2>/dev/null)"
+      ;;
+  esac
+
+  rm -f /tmp/spectra-setup-post.json /tmp/spectra-setup-response.json
 }
 
 print_summary() {
@@ -323,11 +357,21 @@ print_summary() {
   echo "  - If admin consent above failed, grant it manually (steps printed above, in the warning)."
   echo "  - Exchange Online PowerShell certificate, for the Email Security tab — see the README."
   echo
-  echo "To deploy the server with these values, run this on the target server:"
-  echo
-  echo "  SPECTRA_DOMAIN=${SPECTRA_DOMAIN} AZURE_TENANT_ID=${AZURE_TENANT_ID} AZURE_BACKEND_CLIENT_ID=${BACKEND_APP_ID} AZURE_FRONTEND_CLIENT_ID=${FRONTEND_APP_ID} AZURE_API_SCOPE=${AZURE_API_SCOPE} AZURE_BACKEND_CLIENT_SECRET='${AZURE_BACKEND_CLIENT_SECRET}' sudo -E bash deploy/install.sh"
-  echo
-  echo "(the client secret above is only shown this once — save it now if you're not piping straight into install.sh)"
+
+  if [ "$SPECTRA_POSTED" = "yes" ]; then
+    echo "Configured automatically — visit https://${SPECTRA_DOMAIN:-your-domain}/ and sign in."
+  else
+    echo "Paste these into the setup wizard the first time you visit your Spectra URL (or Settings -> Authentication"
+    echo "if it's already past first-run), or re-run this script with SPECTRA_INSTANCE_URL set to POST them directly:"
+    echo
+    echo "  Tenant ID:              ${AZURE_TENANT_ID}"
+    echo "  Frontend client ID:     ${FRONTEND_APP_ID}"
+    echo "  Backend client ID:      ${BACKEND_APP_ID}"
+    echo "  Backend client secret:  ${AZURE_BACKEND_CLIENT_SECRET:-(unchanged — reusing an existing app, see the warning above)}"
+    echo "  API scope:              ${AZURE_API_SCOPE}"
+    echo
+    echo "(the client secret above is only shown this once — save it now if you're not pasting it in right away)"
+  fi
 }
 
 main() {
@@ -350,7 +394,15 @@ main() {
   set_frontend_redirect_uris
   set_frontend_permissions
 
-  write_local_env_files
+  prompt SPECTRA_INSTANCE_URL "URL of your running Spectra instance to auto-configure (blank to skip and just print the values — e.g. https://app.example.com, or http://localhost:5080 for local dev)" ""
+  if [ -n "$SPECTRA_INSTANCE_URL" ]; then
+    prompt_secret SPECTRA_SETUP_TOKEN "Setup token (from setup-token.txt on the server — leave blank to read it locally if this script is running on that same server)"
+    if [ -z "$SPECTRA_SETUP_TOKEN" ] && [ -r /etc/spectra/setup-token.txt ]; then
+      SPECTRA_SETUP_TOKEN="$(tail -n1 /etc/spectra/setup-token.txt)"
+    fi
+  fi
+
+  post_config_to_instance
   print_summary
 }
 

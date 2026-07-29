@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMsal } from "@azure/msal-react";
 import { InteractionStatus } from "@azure/msal-browser";
-import { loginRequest } from "../authConfig";
+import { getLoginRequest } from "../authConfig";
 
 function MicrosoftLogo() {
   return (
@@ -22,7 +22,7 @@ export default function LoginButton() {
     setError(null);
     try {
       // Popup only, triggered by this click — no silent/redirect SSO.
-      await instance.loginPopup(loginRequest);
+      await instance.loginPopup(getLoginRequest());
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sign-in failed");
     }

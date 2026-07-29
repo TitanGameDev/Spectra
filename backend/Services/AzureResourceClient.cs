@@ -53,16 +53,16 @@ public class AzureAccessDeniedException(string message) : Exception(message);
 // principal already exists in their tenant once they've done the ordinary
 // Graph admin-consent step elsewhere in this app, so this is purely an
 // additional RBAC grant, not a new consent flow.
-public class AzureResourceClient(HttpClient httpClient, IConfiguration configuration)
+public class AzureResourceClient(HttpClient httpClient, IActiveAzureAdConfigProvider azureAdConfig)
 {
     public async Task<string> GetAppTokenAsync(string tenantId, CancellationToken ct = default)
     {
-        var clientId = configuration["AzureAd:ClientId"];
-        var clientSecret = configuration["AzureAd:ClientSecret"];
+        var clientId = azureAdConfig.BackendClientId;
+        var clientSecret = azureAdConfig.BackendClientSecret;
         if (string.IsNullOrEmpty(clientSecret))
         {
             throw new InvalidOperationException(
-                "AzureAd:ClientSecret is not configured — required for per-customer Azure Resource Manager access. See README.");
+                "Azure AD isn't configured yet — required for per-customer Azure Resource Manager access. See Settings → Authentication.");
         }
 
         var tokenEndpoint = $"https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token";

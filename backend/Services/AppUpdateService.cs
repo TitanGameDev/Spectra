@@ -155,5 +155,32 @@ public class AppUpdateService(IConfiguration configuration, ILogger<AppUpdateSer
         }
     }
 
+    // Requests a lightweight restart-only cycle — used after saving Azure AD
+    // config, since AddMicrosoftIdentityWebApi reads Tenant/ClientId once at
+    // process start (see Auth/AzureAdBootstrapStore.cs) and there's no
+    // supported way to hot-swap that without fighting Microsoft.Identity.Web's
+    // own options setup. Deliberately a separate flag file from
+    // update-requested — reusing that one would trigger spectra-updater's full
+    // git-pull/rebuild cycle, which is unwanted and slow for "just restart."
+    public (bool Queued, string? Error) RequestRestart()
+    {
+        if (!IsConfigured)
+        {
+            return (false, "Restart automation isn't available on this deployment (not installed via deploy/install.sh) — restart the spectra service manually.");
+        }
+
+        try
+        {
+            var flagPath = Path.Combine(DataDir!, "restart-requested");
+            File.WriteAllText(flagPath, DateTimeOffset.UtcNow.ToString("O"));
+            return (true, null);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to write restart request flag");
+            return (false, "Failed to request a restart — the backend couldn't write to its data directory.");
+        }
+    }
+
     private string? VersionFilePath => DataDir is null ? null : Path.Combine(DataDir, "version.json");
 }
