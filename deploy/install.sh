@@ -80,6 +80,11 @@ AZURE_TENANT_ID="${AZURE_TENANT_ID:-}"
 AZURE_BACKEND_CLIENT_ID="${AZURE_BACKEND_CLIENT_ID:-}"
 AZURE_FRONTEND_CLIENT_ID="${AZURE_FRONTEND_CLIENT_ID:-}"
 AZURE_API_SCOPE="${AZURE_API_SCOPE:-}"
+# Populated automatically if you ran deploy/setup-azure-ad.sh first and fed
+# its output straight into this script; left blank otherwise (same
+# fill-in-later deal as the rest of the AZURE_* values above — needed for
+# the MSP customer-tenant features, not for the app to start).
+AZURE_BACKEND_CLIENT_SECRET="${AZURE_BACKEND_CLIENT_SECRET:-}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -374,7 +379,7 @@ write_backend_env() {
 AzureAd__Instance=https://login.microsoftonline.com/
 AzureAd__TenantId=${AZURE_TENANT_ID}
 AzureAd__ClientId=${AZURE_BACKEND_CLIENT_ID}
-AzureAd__ClientSecret=
+AzureAd__ClientSecret=${AZURE_BACKEND_CLIENT_SECRET}
 
 # Required only for the Email Security sub-tab — see README "Exchange Online
 # security checks". Deploy the .pfx to $SPECTRA_DATA_DIR/certs/ and set both here.
@@ -682,6 +687,7 @@ main() {
   prompt AZURE_BACKEND_CLIENT_ID "Azure AD backend app registration client ID (blank to fill in later)" ""
   prompt AZURE_FRONTEND_CLIENT_ID "Azure AD frontend app registration client ID (blank to fill in later)" ""
   prompt AZURE_API_SCOPE "Backend API scope, e.g. api://<backend-client-id>/access_as_user (blank to fill in later)" ""
+  prompt_secret AZURE_BACKEND_CLIENT_SECRET "Azure AD backend app registration client secret (blank to fill in later)"
 
   install_base_packages
   fetch_source
