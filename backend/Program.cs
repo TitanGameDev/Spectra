@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.RateLimiting;
@@ -28,9 +30,26 @@ QuestPDF.Settings.License = QuestPDF.Infrastructure.LicenseType.Community;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Tenant/ClientId come from AzureAdConfig in the database, not static config —
+// but AddMicrosoftIdentityWebApi needs them now, before the DI container (and
+// therefore the DB) exists. AzureAdBootstrapStore reads a small file kept in
+// sync with the DB row for exactly this purpose; see its doc comment. When
+// unconfigured (fresh install, nobody's set up Azure AD yet), these placeholder
+// values build a syntactically valid authority/audience that simply validates
+// no real token — fine, since nothing reaches this far before
+// /api/public/auth-config reports configured:true and the frontend leaves the
+// setup wizard.
+var azureAdBootstrap = AzureAdBootstrapStore.Load(builder.Environment.ContentRootPath);
 builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-    .AddMicrosoftIdentityWebApi(builder.Configuration.GetSection("AzureAd"));
+    .AddMicrosoftIdentityWebApi(
+        _ => { },
+        (MicrosoftIdentityOptions options) =>
+        {
+            options.Instance = "https://login.microsoftonline.com/";
+            options.TenantId = azureAdBootstrap.TenantId ?? "common";
+            options.ClientId = azureAdBootstrap.BackendClientId ?? "00000000-0000-0000-0000-000000000000";
+        });
 
 builder.Services.AddAuthorization(options =>
 {
@@ -43,9 +62,13 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddDataProtection()
     .PersistKeysToFileSystem(new DirectoryInfo(Path.Combine(builder.Environment.ContentRootPath, "keys")));
 builder.Services.AddSingleton(sp => sp.GetRequiredService<IDataProtectionProvider>().CreateProtector("Spectra.DatabaseConnection"));
+builder.Services.AddKeyedSingleton(
+    "AzureAdConfig",
+    (sp, _) => sp.GetRequiredService<IDataProtectionProvider>().CreateProtector("Spectra.AzureAdConfig"));
 
 builder.Services.AddSingleton<IActiveDatabaseProvider, ActiveDatabaseProvider>();
 builder.Services.AddSingleton<DatabaseHealth>();
+builder.Services.AddSingleton<IActiveAzureAdConfigProvider, ActiveAzureAdConfigProvider>();
 
 // Factory-based (not a fixed connection string) so IActiveDatabaseProvider's state is
 // re-read on every scope resolution (~every request) — this is what lets an admin
@@ -188,6 +211,25 @@ using (var scope = app.Services.CreateScope())
         // guide a reset instead of the app being completely unreachable.
         app.Logger.LogError(ex, "Database unavailable at startup (provider: {Kind})", active.Kind);
         health.MarkUnhealthy(ex.Message);
+    }
+
+    try
+    {
+        var azureAdProvider = scope.ServiceProvider.GetRequiredService<IActiveAzureAdConfigProvider>();
+        var azureAdProtector = scope.ServiceProvider.GetRequiredKeyedService<IDataProtector>("AzureAdConfig");
+        var azureAdConfig = await db.AzureAdConfigs.AsNoTracking().SingleOrDefaultAsync();
+        if (azureAdConfig is { IsConfigured: true })
+        {
+            var secret = azureAdProtector.Unprotect(azureAdConfig.EncryptedBackendClientSecret);
+            azureAdProvider.Update(azureAdConfig.TenantId, azureAdConfig.FrontendClientId, azureAdConfig.BackendClientId, secret, azureAdConfig.ApiScope);
+        }
+    }
+    catch (Exception ex)
+    {
+        // Same degrade-gracefully convention as the database-health block above —
+        // an unreadable/undecryptable row just means "not configured yet" (the
+        // setup wizard stays reachable) rather than a crash at startup.
+        app.Logger.LogWarning(ex, "Couldn't load Azure AD config at startup — treating as unconfigured");
     }
 }
 
@@ -834,7 +876,7 @@ static GraphConditionalAccessPolicyDto NormalizeCaPolicy(GraphConditionalAccessP
     BuiltInControls = p.BuiltInControls ?? [],
 };
 
-app.MapGet("/api/customers/{id:int}/consent-url", async (int id, SpectraDbContext db, IConfiguration configuration) =>
+app.MapGet("/api/customers/{id:int}/consent-url", async (int id, SpectraDbContext db, IActiveAzureAdConfigProvider azureAdConfig, IConfiguration configuration) =>
 {
     var customer = await db.Customers.FindAsync(id);
     if (customer is null)
@@ -842,7 +884,7 @@ app.MapGet("/api/customers/{id:int}/consent-url", async (int id, SpectraDbContex
         return Results.NotFound();
     }
 
-    var clientId = configuration["AzureAd:ClientId"];
+    var clientId = azureAdConfig.BackendClientId;
     var redirectUri = configuration["Cors:AllowedOrigin"] ?? "http://localhost:5173";
     // "state" round-trips through Entra unchanged, back onto the redirect URI as a
     // query param — this is how the tab the consent popup opens in knows which
@@ -1109,6 +1151,7 @@ app.MapPost("/api/settings/database/provision", async (
         var settingsRows = await db.Settings.AsNoTracking().ToListAsync();
         var customers = await db.Customers.AsNoTracking().ToListAsync();
         var customerUsers = await db.CustomerUsers.AsNoTracking().ToListAsync();
+        var azureAdConfigs = await db.AzureAdConfigs.AsNoTracking().ToListAsync();
 
         if (!await targetDb.Users.AnyAsync())
         {
@@ -1234,6 +1277,20 @@ app.MapPost("/api/settings/database/provision", async (
                 UpdatedByEmail = user.FindFirstValue(ClaimTypes.Upn) ?? user.FindFirstValue("preferred_username") ?? "",
             });
         }
+        if (!await targetDb.AzureAdConfigs.AnyAsync())
+        {
+            targetDb.AzureAdConfigs.AddRange(azureAdConfigs.Select(a => new AzureAdConfig
+            {
+                TenantId = a.TenantId,
+                FrontendClientId = a.FrontendClientId,
+                BackendClientId = a.BackendClientId,
+                ApiScope = a.ApiScope,
+                EncryptedBackendClientSecret = a.EncryptedBackendClientSecret,
+                IsConfigured = a.IsConfigured,
+                UpdatedAt = a.UpdatedAt,
+                UpdatedByEmail = a.UpdatedByEmail,
+            }));
+        }
 
         await targetDb.SaveChangesAsync();
 
@@ -1249,6 +1306,113 @@ app.MapPost("/api/settings/database/provision", async (
         logger.LogError(ex, "Failed to provision {DatabaseType} database {Host}:{Port}/{Database}", config.DatabaseType, config.Host, config.Port, config.DatabaseName);
         return Results.Problem($"Failed to provision the database: {ex.Message}", statusCode: 500);
     }
+}).RequireAuthorization("AdminOnly");
+
+// Fetched by the frontend before it ever constructs an MSAL PublicClientApplication
+// — this is what lets a fresh install render a setup wizard instead of a login
+// button, and lets existing installs redirect their MSAL config through the
+// database instead of a build-time env var. Never returns the backend client ID
+// or secret — only what the frontend needs to talk to the frontend app registration.
+app.MapGet("/api/public/auth-config", async (SpectraDbContext db, ILogger<Program> logger) =>
+{
+    try
+    {
+        var config = await db.AzureAdConfigs.AsNoTracking().SingleOrDefaultAsync();
+        return Results.Ok(new
+        {
+            configured = config?.IsConfigured ?? false,
+            clientId = config?.FrontendClientId,
+            tenantId = config?.TenantId,
+            apiScope = config?.ApiScope,
+        });
+    }
+    catch (Exception ex)
+    {
+        // DB unreachable/unmigrated — degrade to "not configured" rather than 500,
+        // same convention as DatabaseHealth: the frontend must always be able to
+        // render *something* (the setup wizard) instead of a blank crash screen.
+        logger.LogWarning(ex, "Couldn't read Azure AD config for /api/public/auth-config");
+        return Results.Ok(new { configured = false, clientId = (string?)null, tenantId = (string?)null, apiScope = (string?)null });
+    }
+}).AllowAnonymous();
+
+// One-time setup — either pasted into the SetupWizard by hand, or POSTed
+// directly by deploy/setup-azure-ad.sh using the token install.sh printed to
+// /etc/spectra/setup-token.txt. Rejects once AzureAdConfig.IsConfigured is
+// already true, which is also what makes the setup token permanently inert
+// after first use — no separate expiry/deletion needed.
+app.MapPost("/api/setup/azure-ad", async (
+    AzureAdConfigRequest request,
+    SpectraDbContext db,
+    [FromKeyedServices("AzureAdConfig")] IDataProtector protector,
+    IActiveAzureAdConfigProvider azureAdProvider,
+    AppUpdateService updateService,
+    IWebHostEnvironment env,
+    IConfiguration configuration,
+    ILogger<Program> logger) =>
+{
+    var existing = await db.AzureAdConfigs.SingleOrDefaultAsync();
+    if (existing is { IsConfigured: true })
+    {
+        return Results.Conflict(new { error = "Azure AD is already configured. Sign in and use Settings → Authentication to change it." });
+    }
+
+    var configuredToken = configuration["Setup:Token"];
+    if (string.IsNullOrEmpty(configuredToken))
+    {
+        if (!env.IsDevelopment())
+        {
+            return Results.Problem("Setup:Token is not configured on this server.", statusCode: 500);
+        }
+        logger.LogWarning("Setup:Token not configured — allowing unauthenticated setup because this is Development.");
+    }
+    else if (!ConstantTimeTokenEquals(request.SetupToken ?? "", configuredToken))
+    {
+        return Results.Json(new { error = "Invalid setup token." }, statusCode: 401);
+    }
+
+    return await SaveAzureAdConfigAsync(
+        db, protector, azureAdProvider, updateService, env,
+        request.TenantId, request.FrontendClientId, request.BackendClientId, request.BackendClientSecret, request.ApiScope,
+        updatedByEmail: "(initial setup)");
+}).AllowAnonymous();
+
+// Settings -> Authentication panel — same save logic as the setup endpoint
+// above, reachable after login for later edits (rotating a secret, fixing a
+// typo). A blank BackendClientSecret means "keep the existing one" — a
+// deliberate divergence from the Database panel (which always requires the
+// password), since Azure AD values are plausibly revisited more often without
+// wanting to re-paste a secret that isn't changing.
+app.MapGet("/api/settings/azure-ad", async (SpectraDbContext db) =>
+{
+    var config = await db.AzureAdConfigs.SingleOrDefaultAsync();
+    return Results.Ok(new
+    {
+        configured = config?.IsConfigured ?? false,
+        tenantId = config?.TenantId,
+        frontendClientId = config?.FrontendClientId,
+        backendClientId = config?.BackendClientId,
+        apiScope = config?.ApiScope,
+        hasSecret = config is not null,
+        updatedAt = config?.UpdatedAt,
+        updatedByEmail = config?.UpdatedByEmail,
+    });
+}).RequireAuthorization("AdminOnly");
+
+app.MapPost("/api/settings/azure-ad", async (
+    AzureAdConfigRequest request,
+    ClaimsPrincipal user,
+    SpectraDbContext db,
+    [FromKeyedServices("AzureAdConfig")] IDataProtector protector,
+    IActiveAzureAdConfigProvider azureAdProvider,
+    AppUpdateService updateService,
+    IWebHostEnvironment env) =>
+{
+    var email = user.FindFirstValue(ClaimTypes.Upn) ?? user.FindFirstValue("preferred_username") ?? "";
+    return await SaveAzureAdConfigAsync(
+        db, protector, azureAdProvider, updateService, env,
+        request.TenantId, request.FrontendClientId, request.BackendClientId, request.BackendClientSecret, request.ApiScope,
+        updatedByEmail: email);
 }).RequireAuthorization("AdminOnly");
 
 // Settings -> Updates panel. See AppUpdateService.cs for the full flow —
@@ -1290,6 +1454,91 @@ app.MapPost("/api/settings/update", (ClaimsPrincipal user, AppUpdateService upda
 app.Run();
 
 static bool IsValidSqlIdentifier(string name) => Regex.IsMatch(name, "^[A-Za-z_][A-Za-z0-9_]{0,127}$");
+
+// Hashes both sides before comparing so a mismatched length doesn't leak via
+// early-exit timing the way a raw CryptographicOperations.FixedTimeEquals over
+// the original strings could.
+static bool ConstantTimeTokenEquals(string provided, string configured) =>
+    CryptographicOperations.FixedTimeEquals(
+        SHA256.HashData(Encoding.UTF8.GetBytes(provided)),
+        SHA256.HashData(Encoding.UTF8.GetBytes(configured)));
+
+// Shared by /api/setup/azure-ad (one-time, unauthenticated) and
+// /api/settings/azure-ad (AdminOnly, for later edits) — same validation and
+// save logic either way. Always restarts the backend afterward: see
+// AppUpdateService.RequestRestart's doc comment for why this can't be a live,
+// no-restart change the way Database settings are.
+static async Task<IResult> SaveAzureAdConfigAsync(
+    SpectraDbContext db,
+    IDataProtector protector,
+    IActiveAzureAdConfigProvider azureAdProvider,
+    AppUpdateService updateService,
+    IWebHostEnvironment env,
+    string? tenantId,
+    string? frontendClientId,
+    string? backendClientId,
+    string? backendClientSecret,
+    string? apiScope,
+    string updatedByEmail)
+{
+    if (string.IsNullOrWhiteSpace(tenantId) || !Guid.TryParse(tenantId, out _))
+    {
+        return Results.BadRequest(new { error = "TenantId must be a valid GUID." });
+    }
+    if (string.IsNullOrWhiteSpace(frontendClientId) || !Guid.TryParse(frontendClientId, out _))
+    {
+        return Results.BadRequest(new { error = "FrontendClientId must be a valid GUID." });
+    }
+    if (string.IsNullOrWhiteSpace(backendClientId) || !Guid.TryParse(backendClientId, out _))
+    {
+        return Results.BadRequest(new { error = "BackendClientId must be a valid GUID." });
+    }
+    if (string.IsNullOrWhiteSpace(apiScope) || !apiScope.StartsWith("api://", StringComparison.Ordinal))
+    {
+        return Results.BadRequest(new { error = "ApiScope must look like api://<backend-client-id>/access_as_user." });
+    }
+
+    var config = await db.AzureAdConfigs.SingleOrDefaultAsync();
+    var keepingExistingSecret = string.IsNullOrEmpty(backendClientSecret) && config is not null;
+    if (!keepingExistingSecret && string.IsNullOrWhiteSpace(backendClientSecret))
+    {
+        return Results.BadRequest(new { error = "BackendClientSecret is required." });
+    }
+
+    if (config is null)
+    {
+        config = new AzureAdConfig
+        {
+            TenantId = "",
+            FrontendClientId = "",
+            BackendClientId = "",
+            ApiScope = "",
+            EncryptedBackendClientSecret = "",
+            UpdatedByEmail = "",
+        };
+        db.AzureAdConfigs.Add(config);
+    }
+
+    config.TenantId = tenantId;
+    config.FrontendClientId = frontendClientId;
+    config.BackendClientId = backendClientId;
+    config.ApiScope = apiScope;
+    if (!keepingExistingSecret)
+    {
+        config.EncryptedBackendClientSecret = protector.Protect(backendClientSecret!);
+    }
+    config.IsConfigured = true;
+    config.UpdatedAt = DateTimeOffset.UtcNow;
+    config.UpdatedByEmail = updatedByEmail;
+    await db.SaveChangesAsync();
+
+    var plaintextSecret = keepingExistingSecret ? protector.Unprotect(config.EncryptedBackendClientSecret) : backendClientSecret!;
+    azureAdProvider.Update(tenantId, frontendClientId, backendClientId, plaintextSecret, apiScope);
+    AzureAdBootstrapStore.Save(env.ContentRootPath, tenantId, backendClientId);
+
+    var (restartQueued, restartError) = updateService.RequestRestart();
+    return Results.Ok(new { success = true, restartRequired = true, restartQueued, restartError });
+}
 
 // Idempotent patch-up for external databases provisioned before a model change —
 // see the call site in the startup block for why EnsureCreated alone isn't enough.
@@ -1443,6 +1692,20 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
 #pragma warning restore EF1002
             }
         }
+        await db.Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS AzureAdConfigs (
+                Id INT NOT NULL AUTO_INCREMENT,
+                TenantId LONGTEXT NOT NULL,
+                FrontendClientId LONGTEXT NOT NULL,
+                BackendClientId LONGTEXT NOT NULL,
+                ApiScope LONGTEXT NOT NULL,
+                EncryptedBackendClientSecret LONGTEXT NOT NULL,
+                IsConfigured TINYINT(1) NOT NULL,
+                UpdatedAt DATETIME(6) NOT NULL,
+                UpdatedByEmail LONGTEXT NOT NULL,
+                PRIMARY KEY (Id)
+            ) CHARACTER SET utf8mb4
+            """);
     }
     else if (providerKind == "sqlserver")
     {
@@ -1553,6 +1816,21 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
                 $"IF COL_LENGTH('CustomerUsers', '{column}') IS NULL ALTER TABLE CustomerUsers ADD {column} {definition}");
 #pragma warning restore EF1002
         }
+        await db.Database.ExecuteSqlRawAsync("""
+            IF OBJECT_ID('AzureAdConfigs', 'U') IS NULL
+            CREATE TABLE AzureAdConfigs (
+                Id int NOT NULL IDENTITY,
+                TenantId nvarchar(max) NOT NULL,
+                FrontendClientId nvarchar(max) NOT NULL,
+                BackendClientId nvarchar(max) NOT NULL,
+                ApiScope nvarchar(max) NOT NULL,
+                EncryptedBackendClientSecret nvarchar(max) NOT NULL,
+                IsConfigured bit NOT NULL,
+                UpdatedAt datetimeoffset NOT NULL,
+                UpdatedByEmail nvarchar(max) NOT NULL,
+                CONSTRAINT PK_AzureAdConfigs PRIMARY KEY (Id)
+            )
+            """);
     }
 }
 
@@ -1626,3 +1904,15 @@ record StoredLicense(string SkuId, string SkuPartNumber);
 record UpdateSettingsRequest(string? AdminGroupId, string? AdminGroupDisplayName);
 record CreateCustomerRequest(string? Name, string? TenantId);
 record DatabaseConnectionRequest(string DatabaseType, string Host, int Port, string DatabaseName, string Username, string Password);
+
+// BackendClientSecret is optional on /api/settings/azure-ad (blank = keep the
+// existing one) but effectively required on /api/setup/azure-ad, since
+// there's no existing secret to keep the first time through — enforced in
+// SaveAzureAdConfigAsync, not here, since both endpoints share this shape.
+record AzureAdConfigRequest(
+    string? SetupToken,
+    string TenantId,
+    string FrontendClientId,
+    string BackendClientId,
+    string? BackendClientSecret,
+    string ApiScope);

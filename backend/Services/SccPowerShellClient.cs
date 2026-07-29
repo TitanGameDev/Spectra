@@ -35,7 +35,7 @@ public class SccCollectionException(string message) : Exception(message);
 // Kept as a sibling client with its own script rather than merged into
 // ExoPowerShellClient, since loading both EXO and IPPS cmdlets in one
 // session risks name collisions (e.g. Get-OrganizationConfig exists in both).
-public class SccPowerShellClient(IConfiguration configuration, ILogger<SccPowerShellClient> logger)
+public class SccPowerShellClient(IActiveAzureAdConfigProvider azureAdConfig, IConfiguration configuration, ILogger<SccPowerShellClient> logger)
 {
     // No per-mailbox enumeration here (unlike EXO's Get-MailboxAuditBypassAssociation),
     // so no need for EXO's bumped 150s.
@@ -43,13 +43,13 @@ public class SccPowerShellClient(IConfiguration configuration, ILogger<SccPowerS
 
     public async Task<SccCollectionResultDto> CollectAsync(string organizationDomain, CancellationToken ct = default)
     {
-        var appId = configuration["AzureAd:ClientId"];
+        var appId = azureAdConfig.BackendClientId;
         var certPath = configuration["Exo:CertificatePath"];
         var certPassword = configuration["Exo:CertificatePassword"];
 
         if (string.IsNullOrEmpty(appId))
         {
-            throw new SccCollectionException("AzureAd:ClientId is not configured.");
+            throw new SccCollectionException("Azure AD isn't configured yet — see Settings → Authentication.");
         }
         if (string.IsNullOrEmpty(certPath) || string.IsNullOrEmpty(certPassword))
         {

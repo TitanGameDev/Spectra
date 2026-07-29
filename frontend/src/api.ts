@@ -1,6 +1,6 @@
 import type { IPublicClientApplication } from "@azure/msal-browser";
 import { InteractionRequiredAuthError } from "@azure/msal-browser";
-import { apiScopes, directoryScopes, graphScopes } from "./authConfig";
+import { getApiScopes, directoryScopes, graphScopes } from "./authConfig";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
 const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
@@ -24,7 +24,7 @@ async function acquireToken(instance: IPublicClientApplication, scopes: string[]
 }
 
 async function apiFetch<T>(instance: IPublicClientApplication, path: string, init?: RequestInit): Promise<T> {
-  const token = await acquireToken(instance, apiScopes);
+  const token = await acquireToken(instance, getApiScopes());
   const response = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
     headers: {
@@ -458,7 +458,7 @@ export function getCustomerAzureResources(instance: IPublicClientApplication, cu
 // go through apiFetch, which always parses the response as JSON) and
 // triggers a normal browser file download via a throwaway object URL/anchor.
 async function downloadFile(instance: IPublicClientApplication, path: string, fileName: string): Promise<void> {
-  const token = await acquireToken(instance, apiScopes);
+  const token = await acquireToken(instance, getApiScopes());
   const response = await fetch(`${API_BASE_URL}${path}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -531,6 +531,49 @@ export function provisionDatabase(
   instance: IPublicClientApplication,
 ): Promise<{ success: boolean; activeProvider: string }> {
   return apiFetch(instance, "/api/settings/database/provision", { method: "POST" });
+}
+
+// Settings -> Authentication panel. Saving always restarts the backend (see
+// AppUpdateService.RequestRestart's doc comment for why) — unlike the
+// Database panel, there's no live-switch, so saveAzureAdConfig's result
+// always has restartRequired: true.
+export interface AzureAdStatus {
+  configured: boolean;
+  tenantId: string | null;
+  frontendClientId: string | null;
+  backendClientId: string | null;
+  apiScope: string | null;
+  hasSecret: boolean;
+  updatedAt: string | null;
+  updatedByEmail: string | null;
+}
+
+export function getAzureAdStatus(instance: IPublicClientApplication): Promise<AzureAdStatus> {
+  return apiFetch<AzureAdStatus>(instance, "/api/settings/azure-ad");
+}
+
+export interface SaveAzureAdConfigResult {
+  success: boolean;
+  restartRequired: boolean;
+  restartQueued: boolean;
+  restartError: string | null;
+}
+
+export function saveAzureAdConfig(
+  instance: IPublicClientApplication,
+  body: {
+    tenantId: string;
+    frontendClientId: string;
+    backendClientId: string;
+    backendClientSecret: string; // blank = keep the existing one
+    apiScope: string;
+  },
+): Promise<SaveAzureAdConfigResult> {
+  return apiFetch<SaveAzureAdConfigResult>(instance, "/api/settings/azure-ad", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 // Settings -> Updates panel. Only meaningful on a server set up by

@@ -9,6 +9,7 @@ public class SpectraDbContext(DbContextOptions<SpectraDbContext> options) : DbCo
     public DbSet<Customer> Customers => Set<Customer>();
     public DbSet<DatabaseConnectionConfig> DatabaseConnections => Set<DatabaseConnectionConfig>();
     public DbSet<CustomerUser> CustomerUsers => Set<CustomerUser>();
+    public DbSet<AzureAdConfig> AzureAdConfigs => Set<AzureAdConfig>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {

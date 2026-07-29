@@ -6,6 +6,12 @@
       "runtimeExecutable": "/bin/bash",
       "runtimeArgs": ["frontend/dev.sh"],
       "port": 5173
+    },
+    {
+      "name": "backend",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "backend/Spectra.Api.csproj", "--urls", "http://localhost:5080"],
+      "port": 5080
     }
   ]
 }

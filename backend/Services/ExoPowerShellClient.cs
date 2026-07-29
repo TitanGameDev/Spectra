@@ -112,7 +112,7 @@ public class ExoCollectionException(string message) : Exception(message);
 // PowerShell SDK, since the ExchangeOnlineManagement module's own dependency
 // surface is large and this way it's just another thing installed on the
 // host (see README), not baked into the app.
-public class ExoPowerShellClient(IConfiguration configuration, ILogger<ExoPowerShellClient> logger)
+public class ExoPowerShellClient(IActiveAzureAdConfigProvider azureAdConfig, IConfiguration configuration, ILogger<ExoPowerShellClient> logger)
 {
     // 180s rather than the original 90s — Get-MailboxAuditBypassAssociation
     // enumerates every mailbox with a bypass association, and
@@ -123,13 +123,13 @@ public class ExoPowerShellClient(IConfiguration configuration, ILogger<ExoPowerS
 
     public async Task<ExoCollectionResultDto> CollectAsync(string organizationDomain, CancellationToken ct = default)
     {
-        var appId = configuration["AzureAd:ClientId"];
+        var appId = azureAdConfig.BackendClientId;
         var certPath = configuration["Exo:CertificatePath"];
         var certPassword = configuration["Exo:CertificatePassword"];
 
         if (string.IsNullOrEmpty(appId))
         {
-            throw new ExoCollectionException("AzureAd:ClientId is not configured.");
+            throw new ExoCollectionException("Azure AD isn't configured yet — see Settings → Authentication.");
         }
         if (string.IsNullOrEmpty(certPath) || string.IsNullOrEmpty(certPassword))
         {

@@ -116,18 +116,18 @@ public class GraphPermissionDeniedException(string message) : Exception(message)
 // against that customer's tenant — but it does mean the customer's Entra
 // admin must have granted admin consent to Spectra's app registration first
 // (see the consent-url endpoint in Program.cs).
-public class GraphAppClient(HttpClient httpClient, IConfiguration configuration)
+public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider azureAdConfig)
 {
     // Public so callers doing many per-user calls (e.g. license details across
     // a whole tenant) can acquire the app token once instead of once per call.
     public async Task<string> GetAppTokenAsync(string tenantId, CancellationToken ct = default)
     {
-        var clientId = configuration["AzureAd:ClientId"];
-        var clientSecret = configuration["AzureAd:ClientSecret"];
+        var clientId = azureAdConfig.BackendClientId;
+        var clientSecret = azureAdConfig.BackendClientSecret;
         if (string.IsNullOrEmpty(clientSecret))
         {
             throw new InvalidOperationException(
-                "AzureAd:ClientSecret is not configured — required for per-customer Graph access. See README.");
+                "Azure AD isn't configured yet — required for per-customer Graph access. See Settings → Authentication.");
         }
 
         var tokenEndpoint = $"https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token";

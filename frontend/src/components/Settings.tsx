@@ -14,12 +14,15 @@ import {
   provisionDatabase,
   getUpdateStatus,
   requestUpdate,
+  getAzureAdStatus,
+  saveAzureAdConfig,
   type GraphGroup,
   type SettingsResponse,
   type Customer,
   type DatabaseStatus,
   type DatabaseType,
   type UpdateStatusResponse,
+  type AzureAdStatus,
 } from "../api";
 
 const DEFAULT_PORTS: Record<DatabaseType, string> = { sqlserver: "1433", mysql: "3306" };
@@ -74,6 +77,18 @@ export default function Settings() {
   const [requestingUpdate, setRequestingUpdate] = useState(false);
   const [requestUpdateError, setRequestUpdateError] = useState<string | null>(null);
 
+  const [azureAdStatus, setAzureAdStatus] = useState<AzureAdStatus | null>(null);
+  const [azureAdStatusError, setAzureAdStatusError] = useState<string | null>(null);
+  const [showAzureAdForm, setShowAzureAdForm] = useState(false);
+  const [azureAdTenantId, setAzureAdTenantId] = useState("");
+  const [azureAdFrontendClientId, setAzureAdFrontendClientId] = useState("");
+  const [azureAdBackendClientId, setAzureAdBackendClientId] = useState("");
+  const [azureAdBackendClientSecret, setAzureAdBackendClientSecret] = useState("");
+  const [azureAdApiScope, setAzureAdApiScope] = useState("");
+  const [azureAdSaving, setAzureAdSaving] = useState(false);
+  const [azureAdSaveError, setAzureAdSaveError] = useState<string | null>(null);
+  const [azureAdRestarting, setAzureAdRestarting] = useState(false);
+
   const handleDbTypeChange = (type: DatabaseType) => {
     setDbType(type);
     setDbPort(DEFAULT_PORTS[type]);
@@ -91,6 +106,19 @@ export default function Settings() {
     getUpdateStatus(instance)
       .then(setUpdateStatus)
       .catch((err) => setUpdateStatusError(err instanceof Error ? err.message : "Failed to load update status"));
+  }, [instance, me?.isAdmin]);
+
+  useEffect(() => {
+    if (!me?.isAdmin) return;
+    getAzureAdStatus(instance)
+      .then((status) => {
+        setAzureAdStatus(status);
+        setAzureAdTenantId(status.tenantId ?? "");
+        setAzureAdFrontendClientId(status.frontendClientId ?? "");
+        setAzureAdBackendClientId(status.backendClientId ?? "");
+        setAzureAdApiScope(status.apiScope ?? "");
+      })
+      .catch((err) => setAzureAdStatusError(err instanceof Error ? err.message : "Failed to load Azure AD status"));
   }, [instance, me?.isAdmin]);
 
   useEffect(() => {
@@ -313,10 +341,48 @@ export default function Settings() {
     }
   };
 
+  // Saving restarts the backend (see AppUpdateService.RequestRestart's doc
+  // comment for why) — which will sign out everyone currently signed in,
+  // including whoever's making this change, so confirm before doing it.
+  const handleSaveAzureAd = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!window.confirm("Saving will restart the Spectra backend and sign out every current user, including you. Continue?")) {
+      return;
+    }
+    setAzureAdSaving(true);
+    setAzureAdSaveError(null);
+    try {
+      await saveAzureAdConfig(instance, {
+        tenantId: azureAdTenantId.trim(),
+        frontendClientId: azureAdFrontendClientId.trim(),
+        backendClientId: azureAdBackendClientId.trim(),
+        backendClientSecret: azureAdBackendClientSecret.trim(),
+        apiScope: azureAdApiScope.trim(),
+      });
+      setAzureAdRestarting(true);
+    } catch (err) {
+      setAzureAdSaveError(err instanceof Error ? err.message : "Failed to save Azure AD configuration");
+      setAzureAdSaving(false);
+    }
+  };
+
   // Defense in depth — the backend already rejects non-admins with a 403;
   // this just avoids flashing the page for someone who navigates here directly.
   if (!meLoading && me && !me.isAdmin) {
     return <Navigate to="/" replace />;
+  }
+
+  // The save that got us here already restarted the backend — the current
+  // session's token was validated against the old Azure AD config and won't
+  // survive the restart, so there's no point rendering the rest of Settings
+  // (or anything else) until the user signs back in.
+  if (azureAdRestarting) {
+    return (
+      <div className="dashboard-intro">
+        <h1>Restarting…</h1>
+        <p>Azure AD configuration saved — the backend is restarting to apply it. Sign in again once it's back.</p>
+      </div>
+    );
   }
 
   return (
@@ -603,6 +669,93 @@ export default function Settings() {
 
         {switchedProvider && (
           <p className="fine-print">Switched to {DATABASE_LABELS[switchedProvider]} — Spectra is now using this database.</p>
+        )}
+      </div>
+
+      <div className="settings-panel">
+        <h2>Authentication</h2>
+        <p className="settings-hint">
+          The Azure AD (Entra ID) app registrations Spectra signs in with and uses for per-customer data collection.
+          Set once via the setup wizard on first run — change it here if you need to rotate the secret or fix a
+          value. Saving restarts the backend and signs everyone out, including you.
+        </p>
+
+        {azureAdStatusError && <p className="login-error">{azureAdStatusError}</p>}
+
+        {showAzureAdForm || !azureAdStatus?.configured ? (
+          <form className="customer-add-form" onSubmit={handleSaveAzureAd}>
+            <input
+              type="text"
+              className="text-input"
+              placeholder="Tenant ID"
+              value={azureAdTenantId}
+              onChange={(e) => setAzureAdTenantId(e.target.value)}
+              required
+            />
+            <input
+              type="text"
+              className="text-input"
+              placeholder="Frontend app registration client ID"
+              value={azureAdFrontendClientId}
+              onChange={(e) => setAzureAdFrontendClientId(e.target.value)}
+              required
+            />
+            <input
+              type="text"
+              className="text-input"
+              placeholder="Backend app registration client ID"
+              value={azureAdBackendClientId}
+              onChange={(e) => setAzureAdBackendClientId(e.target.value)}
+              required
+            />
+            <input
+              type="password"
+              className="text-input"
+              placeholder={azureAdStatus?.hasSecret ? "Backend client secret (leave blank to keep the current one)" : "Backend client secret"}
+              value={azureAdBackendClientSecret}
+              onChange={(e) => setAzureAdBackendClientSecret(e.target.value)}
+              autoComplete="new-password"
+              required={!azureAdStatus?.hasSecret}
+            />
+            <input
+              type="text"
+              className="text-input"
+              placeholder="API scope, e.g. api://<backend-client-id>/access_as_user"
+              value={azureAdApiScope}
+              onChange={(e) => setAzureAdApiScope(e.target.value)}
+              required
+            />
+            <div className="settings-actions">
+              <button type="submit" className="btn btn-primary" disabled={azureAdSaving}>
+                {azureAdSaving ? "Saving…" : "Save and restart"}
+              </button>
+              {azureAdStatus?.configured && (
+                <button type="button" className="btn btn-ghost" onClick={() => setShowAzureAdForm(false)}>
+                  Cancel
+                </button>
+              )}
+            </div>
+            {azureAdSaveError && <p className="login-error">{azureAdSaveError}</p>}
+          </form>
+        ) : (
+          <>
+            <div className="db-status db-status-active">
+              <span className="status-dot status-dot-connected" aria-hidden="true" />
+              <div>
+                <strong>Configured</strong>
+                <p className="fine-print">
+                  Tenant {azureAdStatus.tenantId} — last updated{" "}
+                  {azureAdStatus.updatedAt ? new Date(azureAdStatus.updatedAt).toLocaleString() : "unknown"}
+                  {azureAdStatus.updatedByEmail ? ` by ${azureAdStatus.updatedByEmail}` : ""}
+                </p>
+              </div>
+            </div>
+            <div className="settings-actions">
+              <button className="btn btn-ghost" onClick={() => setShowAzureAdForm(true)}>
+                Edit
+              </button>
+            </div>
+          </>
         )}
       </div>
 
