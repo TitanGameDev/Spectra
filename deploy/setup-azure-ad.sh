@@ -112,9 +112,16 @@ graph_delegated_scope_id() {
 }
 
 # Looks up an existing app by display name so re-running this script
-# doesn't create duplicates — reuses what's there instead.
+# doesn't create duplicates — reuses what's there instead. az ad app list
+# --display-name does a STARTSWITH match server-side, not exact — searching
+# for "Spectra" (the frontend app's name) also matches "Spectra API" (the
+# backend app's name), and since Graph doesn't guarantee result ordering,
+# picking [0] can silently return the WRONG app, corrupting it with both
+# apps' redirect URIs/permissions on one Azure object. Filter to an exact
+# match client-side via JMESPath instead of trusting the server-side prefix
+# search's ordering.
 find_existing_app() {
-  az ad app list --display-name "$1" --query "[0].appId" -o tsv 2>/dev/null
+  az ad app list --display-name "$1" --query "[?displayName=='$1'].appId | [0]" -o tsv 2>/dev/null
 }
 
 create_or_reuse_backend_app() {
@@ -320,9 +327,17 @@ body = {
 print(json.dumps(body))
 ' "$SPECTRA_SETUP_TOKEN" "$AZURE_TENANT_ID" "$FRONTEND_APP_ID" "$BACKEND_APP_ID" "$AZURE_BACKEND_CLIENT_SECRET" "$AZURE_API_SCOPE" > /tmp/spectra-setup-post.json
 
+  # curl can still print a partial -w value to stdout even when it then exits
+  # non-zero (e.g. connection refused) — capturing that AND falling back to
+  # "000" on failure double-counts into "000000". Check curl's own exit
+  # status separately instead of folding it into the command substitution.
   local http_code
-  http_code="$(curl -sS -o /tmp/spectra-setup-response.json -w '%{http_code}' -X POST "${SPECTRA_INSTANCE_URL%/}/api/setup/azure-ad" \
-    -H 'Content-Type: application/json' --data @/tmp/spectra-setup-post.json 2>/dev/null || echo "000")"
+  if http_code="$(curl -sS --max-time 15 -o /tmp/spectra-setup-response.json -w '%{http_code}' -X POST "${SPECTRA_INSTANCE_URL%/}/api/setup/azure-ad" \
+    -H 'Content-Type: application/json' --data @/tmp/spectra-setup-post.json 2>/tmp/spectra-curl-err)"; then
+    :
+  else
+    http_code="000"
+  fi
 
   case "$http_code" in
     200)
@@ -336,14 +351,14 @@ print(json.dumps(body))
       warn "The setup token was rejected — check setup-token.txt on the target server."
       ;;
     000)
-      warn "Couldn't reach ${SPECTRA_INSTANCE_URL} — check the URL and that the server is up."
+      warn "Couldn't reach ${SPECTRA_INSTANCE_URL} ($(cat /tmp/spectra-curl-err 2>/dev/null | tail -1)). If this script is running ON the same server, try SPECTRA_INSTANCE_URL=http://localhost:5080 instead of the public domain — looping back out through Cloudflare/nginx to your own public hostname from the box itself is often unreliable."
       ;;
     *)
       warn "Unexpected response ($http_code): $(cat /tmp/spectra-setup-response.json 2>/dev/null)"
       ;;
   esac
 
-  rm -f /tmp/spectra-setup-post.json /tmp/spectra-setup-response.json
+  rm -f /tmp/spectra-setup-post.json /tmp/spectra-setup-response.json /tmp/spectra-curl-err
 }
 
 print_summary() {
