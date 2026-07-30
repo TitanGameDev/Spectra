@@ -102,6 +102,21 @@ prompt() {
   fi
 }
 
+# Same as prompt(), but for yes/no questions — normalizes y/Y/yes/Yes/YES (and
+# equivalents for "no") so a natural single-letter answer doesn't silently get
+# treated as the opposite of what was intended. A prior version of this script
+# did a literal string comparison against "yes", so typing "y" instead of the
+# full word "yes" silently skipped TLS setup entirely with no error — exactly
+# the kind of mistake this exists to prevent.
+prompt_yesno() {
+  local __var="$1"
+  prompt "$@"
+  case "${!__var}" in
+    y | Y | yes | Yes | YES) printf -v "$__var" 'yes' ;;
+    *) printf -v "$__var" 'no' ;;
+  esac
+}
+
 # Same as prompt() but for values that shouldn't echo to the terminal or
 # end up in shell history (API tokens, etc.) — read -s instead of read -r.
 prompt_secret() {
@@ -723,15 +738,15 @@ main() {
   echo "=================="
   prompt SPECTRA_DOMAIN "Domain this app will be served from (e.g. spectra.example.com)"
   [ -n "$SPECTRA_DOMAIN" ] || die "A domain is required (nginx/certbot need it) — set SPECTRA_DOMAIN or answer the prompt."
-  prompt SPECTRA_SETUP_TLS "Set up HTTPS now via Let's Encrypt? DNS for $SPECTRA_DOMAIN must already point here (yes/no)" "no"
+  prompt_yesno SPECTRA_SETUP_TLS "Set up HTTPS now via Let's Encrypt? DNS for $SPECTRA_DOMAIN must already point here (yes/no)" "no"
   if [ "$SPECTRA_SETUP_TLS" = "yes" ]; then
-    prompt SPECTRA_USE_CLOUDFLARE_DNS "Is $SPECTRA_DOMAIN proxied through Cloudflare (orange-cloud)? The standard HTTP challenge can't work through that, so we'll use a DNS challenge via the Cloudflare API instead (yes/no)" "no"
+    prompt_yesno SPECTRA_USE_CLOUDFLARE_DNS "Is $SPECTRA_DOMAIN proxied through Cloudflare (orange-cloud)? The standard HTTP challenge can't work through that, so we'll use a DNS challenge via the Cloudflare API instead (yes/no)" "no"
     if [ "$SPECTRA_USE_CLOUDFLARE_DNS" = "yes" ]; then
       prompt_secret SPECTRA_CLOUDFLARE_API_TOKEN "Cloudflare API token (Zone:DNS:Edit, scoped to this domain — create one at https://dash.cloudflare.com/profile/api-tokens)"
       [ -n "$SPECTRA_CLOUDFLARE_API_TOKEN" ] || die "A Cloudflare API token is required for the DNS challenge (or answer 'no' above to use the standard HTTP challenge instead, if the domain isn't actually proxied)."
     fi
   fi
-  prompt SPECTRA_SETUP_FIREWALL "Configure ufw to only allow SSH/80/443? (yes/no)" "no"
+  prompt_yesno SPECTRA_SETUP_FIREWALL "Configure ufw to only allow SSH/80/443? (yes/no)" "no"
 
   install_base_packages
   fetch_source
