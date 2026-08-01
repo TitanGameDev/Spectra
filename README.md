@@ -1,5 +1,25 @@
 # Spectra
 
+## TL;DR install
+
+On a fresh Ubuntu/Debian server, as root or with sudo:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TitanGameDev/Spectra/main/deploy/install.sh | sudo bash
+```
+
+Answer the three prompts — domain, HTTPS via Let's Encrypt (`yes` if you have DNS pointed here already), firewall. Note the setup token it prints at the end.
+
+Then, **from your own machine** (not the server — this needs your Azure AD admin login, not root):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/TitanGameDev/Spectra/main/deploy/setup-azure-ad.sh | bash
+```
+
+Sign in to Azure when prompted, answer the domain prompt the same way you did above, then just hit Enter through the rest — it creates the two Entra app registrations Spectra needs and pushes the result straight into the server for you. Paste in the setup token from the first step when asked (running this on the server itself instead of your own machine skips that prompt — it just reads the token off disk).
+
+Visit your domain and sign in — done. Everything below expands on what each step actually does, Cloudflare-proxied domains, cutting over to MySQL/SQL Server, and the full feature/permission reference.
+
 ## Deploy
 
 For a fresh Ubuntu/Debian server, [`deploy/install.sh`](deploy/install.sh) automates the entire "Production hardening" checklist further down this doc end to end — it's the fast path; that checklist is still the reference for what it's actually doing and for any other distro.
