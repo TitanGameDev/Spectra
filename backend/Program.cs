@@ -1342,6 +1342,7 @@ app.MapGet("/api/public/auth-config", async (SpectraDbContext db, ILogger<Progra
 // already true, which is also what makes the setup token permanently inert
 // after first use — no separate expiry/deletion needed.
 app.MapPost("/api/setup/azure-ad", async (
+    HttpContext httpContext,
     AzureAdConfigRequest request,
     SpectraDbContext db,
     [FromKeyedServices("AzureAdConfig")] IDataProtector protector,
@@ -1372,7 +1373,7 @@ app.MapPost("/api/setup/azure-ad", async (
     }
 
     return await SaveAzureAdConfigAsync(
-        db, protector, azureAdProvider, updateService, env,
+        httpContext, db, protector, azureAdProvider, updateService, env, logger,
         request.TenantId, request.FrontendClientId, request.BackendClientId, request.BackendClientSecret, request.ApiScope,
         updatedByEmail: "(initial setup)");
 }).AllowAnonymous();
@@ -1400,17 +1401,19 @@ app.MapGet("/api/settings/azure-ad", async (SpectraDbContext db) =>
 }).RequireAuthorization("AdminOnly");
 
 app.MapPost("/api/settings/azure-ad", async (
+    HttpContext httpContext,
     AzureAdConfigRequest request,
     ClaimsPrincipal user,
     SpectraDbContext db,
     [FromKeyedServices("AzureAdConfig")] IDataProtector protector,
     IActiveAzureAdConfigProvider azureAdProvider,
     AppUpdateService updateService,
-    IWebHostEnvironment env) =>
+    IWebHostEnvironment env,
+    ILogger<Program> logger) =>
 {
     var email = user.FindFirstValue(ClaimTypes.Upn) ?? user.FindFirstValue("preferred_username") ?? "";
     return await SaveAzureAdConfigAsync(
-        db, protector, azureAdProvider, updateService, env,
+        httpContext, db, protector, azureAdProvider, updateService, env, logger,
         request.TenantId, request.FrontendClientId, request.BackendClientId, request.BackendClientSecret, request.ApiScope,
         updatedByEmail: email);
 }).RequireAuthorization("AdminOnly");
@@ -1469,11 +1472,13 @@ static bool ConstantTimeTokenEquals(string provided, string configured) =>
 // AppUpdateService.RequestRestart's doc comment for why this can't be a live,
 // no-restart change the way Database settings are.
 static async Task<IResult> SaveAzureAdConfigAsync(
+    HttpContext httpContext,
     SpectraDbContext db,
     IDataProtector protector,
     IActiveAzureAdConfigProvider azureAdProvider,
     AppUpdateService updateService,
     IWebHostEnvironment env,
+    ILogger<Program> logger,
     string? tenantId,
     string? frontendClientId,
     string? backendClientId,
@@ -1536,7 +1541,34 @@ static async Task<IResult> SaveAzureAdConfigAsync(
     azureAdProvider.Update(tenantId, frontendClientId, backendClientId, plaintextSecret, apiScope);
     AzureAdBootstrapStore.Save(env.ContentRootPath, tenantId, backendClientId);
 
-    var (restartQueued, restartError) = updateService.RequestRestart();
+    // spectra-restarter.path reacts almost instantly once the restart flag
+    // file exists — requesting it inline here raced with this very HTTP
+    // response still being sent, killing the connection outright (504/reset)
+    // instead of delivering a clean 200. Deferring to OnCompleted guarantees
+    // the response has actually gone out before the process can be restarted.
+    // The "not configured" branch is cheap (no I/O, returns immediately), so
+    // it's safe to call synchronously to get an accurate message.
+    bool restartQueued;
+    string? restartError;
+    if (updateService.IsConfigured)
+    {
+        restartQueued = true;
+        restartError = null;
+        httpContext.Response.OnCompleted(() =>
+        {
+            var (queued, error) = updateService.RequestRestart();
+            if (!queued)
+            {
+                logger.LogWarning("Deferred restart request failed after Azure AD config save: {Error}", error);
+            }
+            return Task.CompletedTask;
+        });
+    }
+    else
+    {
+        (restartQueued, restartError) = updateService.RequestRestart();
+    }
+
     return Results.Ok(new { success = true, restartRequired = true, restartQueued, restartError });
 }
 
