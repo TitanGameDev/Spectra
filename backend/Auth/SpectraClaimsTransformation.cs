@@ -33,7 +33,19 @@ public class SpectraClaimsTransformation(SpectraDbContext db, DatabaseHealth dat
             return principal;
         }
 
-        var objectId = principal.FindFirstValue("oid") ?? principal.FindFirstValue(ClaimTypes.NameIdentifier);
+        // "oid" is the stable Entra directory object ID for a user — the same
+        // value regardless of which app registration they sign into. .NET's
+        // default JWT claim handling can remap it to this long-form URI
+        // instead of leaving it as literal "oid" depending on configuration,
+        // so both are checked before ever falling back to ClaimTypes.NameIdentifier
+        // (== the "sub" claim), which is deliberately DIFFERENT per app
+        // registration by OIDC design (pairwise identifiers, for privacy) —
+        // using it here would silently create a new user row every time the
+        // frontend app registration changes, rather than recognizing the same
+        // person.
+        var objectId = principal.FindFirstValue("oid")
+            ?? principal.FindFirstValue("http://schemas.microsoft.com/identity/claims/objectidentifier")
+            ?? principal.FindFirstValue(ClaimTypes.NameIdentifier);
         if (string.IsNullOrEmpty(objectId))
         {
             identity.AddClaim(new Claim(AdminClaimType, "false"));
