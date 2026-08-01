@@ -481,6 +481,15 @@ Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true
 ProtectSystem=strict
+# ProtectSystem=strict makes /tmp read-only along with everything else not
+# listed in ReadWritePaths below — without PrivateTmp, .NET's Data Protection
+# system fails the moment it needs to create its first encryption key (it
+# writes a temp file via Path.GetTempFileName() as part of that, regardless
+# of where PersistKeysToFileSystem actually points). PrivateTmp gives this
+# service its own isolated, writable tmpfs /tmp instead of exposing (or
+# blocking) the host's real one — the standard, recommended pairing with
+# ProtectSystem=strict, not a loosening of it.
+PrivateTmp=true
 # Data Protection keys and database-provider.json are both written relative
 # to the app's own ContentRootPath (see Program.cs), not just \$SPECTRA_DATA_DIR
 # — both need to stay writable across restarts, the keys directory especially,
