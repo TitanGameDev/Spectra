@@ -409,12 +409,26 @@ main() {
   set_frontend_redirect_uris
   set_frontend_permissions
 
-  prompt SPECTRA_INSTANCE_URL "URL of your running Spectra instance to auto-configure (blank to skip and just print the values — e.g. https://app.example.com, or http://localhost:5080 for local dev)" ""
+  # Defaults to the domain just entered above — in the overwhelming majority
+  # of cases that's exactly the instance you want this pushed to, so pushing
+  # straight to the main stack is the path of least resistance (just hit
+  # Enter) rather than something you have to opt into a second time. Still
+  # overridable (e.g. http://localhost:5080 to bypass Cloudflare/nginx when
+  # running this on the server itself) or clearable to fall back to printing
+  # the values instead.
+  local default_instance_url=""
+  [ -n "$SPECTRA_DOMAIN" ] && default_instance_url="https://${SPECTRA_DOMAIN}"
+  prompt SPECTRA_INSTANCE_URL "URL of your running Spectra instance to auto-configure (blank to skip and just print the values instead)" "$default_instance_url"
   if [ -n "$SPECTRA_INSTANCE_URL" ]; then
-    prompt_secret SPECTRA_SETUP_TOKEN "Setup token (from setup-token.txt on the server — leave blank to read it locally if this script is running on that same server)"
+    # Check locally first — if this is running on the same box as the
+    # server (or shares a filesystem with it), the token's just sitting
+    # there and asking for it is one more thing standing between "hit
+    # Enter" and it being pushed to the main stack for you.
     if [ -z "$SPECTRA_SETUP_TOKEN" ] && [ -r /etc/spectra/setup-token.txt ]; then
       SPECTRA_SETUP_TOKEN="$(tail -n1 /etc/spectra/setup-token.txt)"
+      log "Found the setup token locally at /etc/spectra/setup-token.txt."
     fi
+    prompt_secret SPECTRA_SETUP_TOKEN "Setup token (from setup-token.txt on the server)"
   fi
 
   post_config_to_instance
