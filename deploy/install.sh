@@ -398,6 +398,23 @@ build_backend() {
   rm -rf "$SPECTRA_INSTALL_DIR/app.new"
   dotnet publish "$SPECTRA_SRC_DIR/backend/Spectra.Api.csproj" -c Release -o "$SPECTRA_INSTALL_DIR/app.new" --nologo
   chown -R "$SPECTRA_SYSTEM_USER:$SPECTRA_SYSTEM_USER" "$SPECTRA_INSTALL_DIR/app.new"
+
+  # None of these are build output — they're runtime state the running app
+  # writes into its own ContentRootPath (== $SPECTRA_INSTALL_DIR/app, see
+  # Program.cs/AzureAdBootstrapStore.cs/ActiveDatabaseProvider.cs) and must
+  # survive a rerun against an already-installed instance: the Data
+  # Protection key ring (encrypts the Azure AD client secret and any
+  # external DB password stored in the database — losing it makes that data
+  # permanently undecryptable, not just briefly broken), the Azure AD JWT
+  # bootstrap marker (inbound token audience validation reads this once at
+  # startup), and the active-database marker. No-op on a genuinely fresh
+  # install, since none of these exist yet.
+  for item in keys azuread-bootstrap.json database-provider.json; do
+    if [ -e "$SPECTRA_INSTALL_DIR/app/$item" ]; then
+      cp -a "$SPECTRA_INSTALL_DIR/app/$item" "$SPECTRA_INSTALL_DIR/app.new/$item"
+    fi
+  done
+
   rm -rf "$SPECTRA_INSTALL_DIR/app"
   mv "$SPECTRA_INSTALL_DIR/app.new" "$SPECTRA_INSTALL_DIR/app"
 }
