@@ -1,12 +1,13 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Spectra.Api.Services;
 
 public record SccDlpPolicyDto(string? Name, bool? Enabled, string? Mode);
 public record SccRetentionPolicyDto(string? Name, bool? Enabled, string? Mode);
-public record SccAlertPolicyDto(string? Name, string? Category, string? Severity, bool? Disabled, List<string>? NotifyUser);
+public record SccAlertPolicyDto(string? Name, string? Category, string? Severity, bool? Disabled, [property: JsonConverter(typeof(FlexibleStringListJsonConverter))] List<string>? NotifyUser);
 
 public record SccCollectionResultDto(
     List<SccDlpPolicyDto>? DlpPolicies,
