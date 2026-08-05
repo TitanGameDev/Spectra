@@ -101,8 +101,19 @@ git -C "$SPECTRA_SRC_DIR" checkout --quiet "$SPECTRA_GIT_REF"
 git -C "$SPECTRA_SRC_DIR" reset --quiet --hard "origin/$SPECTRA_GIT_REF"
 
 log "Publishing the backend..."
-dotnet publish "$SPECTRA_SRC_DIR/backend/Spectra.Api.csproj" -c Release -o "$SPECTRA_INSTALL_DIR/app" --nologo
-chown -R "$SPECTRA_SYSTEM_USER:$SPECTRA_SYSTEM_USER" "$SPECTRA_INSTALL_DIR/app"
+# Publish into a staging directory rather than straight into
+# $SPECTRA_INSTALL_DIR/app — spectra.service is still running at this point
+# with the old Spectra.Api.dll/.pdb open, and overwriting those files in
+# place while they're in use can fail partway (seen as MSB3021/"could not
+# copy... being used by another process"), leaving the live directory in a
+# broken half-published state that only surfaces on the next restart. The
+# swap below only touches the live directory once the build has fully
+# succeeded.
+rm -rf "$SPECTRA_INSTALL_DIR/app.new"
+dotnet publish "$SPECTRA_SRC_DIR/backend/Spectra.Api.csproj" -c Release -o "$SPECTRA_INSTALL_DIR/app.new" --nologo
+chown -R "$SPECTRA_SYSTEM_USER:$SPECTRA_SYSTEM_USER" "$SPECTRA_INSTALL_DIR/app.new"
+rm -rf "$SPECTRA_INSTALL_DIR/app"
+mv "$SPECTRA_INSTALL_DIR/app.new" "$SPECTRA_INSTALL_DIR/app"
 
 log "Building the frontend..."
 # VITE_API_BASE_URL must be "" so API calls stay same-origin through the nginx
