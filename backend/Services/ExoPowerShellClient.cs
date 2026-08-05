@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Spectra.Api.Services;
 
@@ -29,7 +30,7 @@ public record ExoHostedContentFilterPolicyDto(
     string? Name,
     bool? IsDefault,
     int? BulkThreshold,
-    List<string>? AllowedSenderDomains,
+    [property: JsonConverter(typeof(FlexibleStringListJsonConverter))] List<string>? AllowedSenderDomains,
     string? SpamAction,
     string? HighConfidenceSpamAction,
     string? PhishSpamAction);
@@ -43,8 +44,8 @@ public record ExoMalwareFilterPolicyDto(
     bool? EnableExternalSenderAdminNotifications);
 public record ExoDkimSigningConfigDto(string? Domain, bool? Enabled);
 public record ExoTransportRuleDto(string? Name, string? State, int? Priority, string? Description, string? SetSCL, bool? DeleteMessage);
-public record ExoSharingPolicyDto(string? Name, bool? Default, bool? Enabled, List<string>? Domains);
-public record ExoHostedConnectionFilterPolicyDto(string? Name, bool? IsDefault, List<string>? IPAllowList);
+public record ExoSharingPolicyDto(string? Name, bool? Default, bool? Enabled, [property: JsonConverter(typeof(FlexibleStringListJsonConverter))] List<string>? Domains);
+public record ExoHostedConnectionFilterPolicyDto(string? Name, bool? IsDefault, [property: JsonConverter(typeof(FlexibleStringListJsonConverter))] List<string>? IPAllowList);
 public record ExoAdminAuditLogConfigDto(bool? UnifiedAuditLogIngestionEnabled);
 public record ExoAtpPolicyForO365Dto(bool? EnableATPForSPOTeamsODB, bool? EnableSafeDocs);
 public record ExoRemoteDomainDto(string? DomainName, bool? AutoForwardEnabled);
@@ -66,12 +67,12 @@ public record ExoMailboxForwardingDto(
 // owner can open it. Excludes NT AUTHORITY\SELF (every mailbox's own
 // default self-grant) and inherited entries, so only explicit, meaningful
 // delegate access shows up (see Collect-ExoSecurityData.ps1's filtering).
-public record ExoMailboxPermissionDto(string? Identity, string? User, List<string>? AccessRights, bool? Deny);
+public record ExoMailboxPermissionDto(string? Identity, string? User, [property: JsonConverter(typeof(FlexibleStringListJsonConverter))] List<string>? AccessRights, bool? Deny);
 
 // Send As grants — a different permission from mailbox access above: lets a
 // delegate send mail that appears to come from the mailbox, without being
 // able to open/read it.
-public record ExoRecipientPermissionDto(string? Identity, string? Trustee, List<string>? AccessRights);
+public record ExoRecipientPermissionDto(string? Identity, string? Trustee, [property: JsonConverter(typeof(FlexibleStringListJsonConverter))] List<string>? AccessRights);
 
 public record ExoCollectionResultDto(
     ExoOrganizationConfigDto? OrganizationConfig,
