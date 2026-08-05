@@ -750,6 +750,37 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         throw new InvalidOperationException($"Global Reader role assignment failed: {summary}");
     }
 
+    // Microsoft conceals real user identities in usage-report data by default,
+    // tenant-wide — the fix is normally a manual toggle in the Microsoft 365
+    // admin center (Settings -> Org Settings -> Services -> Reports), but it's
+    // also a plain Graph setting Spectra can flip itself, same idea as
+    // EnsureGlobalReaderRoleAssignedAsync above. Needs ReportSettings.ReadWrite.All.
+    // Idempotent — safe to call on every collection run where concealment is
+    // detected, until it succeeds.
+    public async Task<bool> EnsureReportIdentitiesRevealedAsync(string token, CancellationToken ct = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Patch, "https://graph.microsoft.com/v1.0/admin/reportSettings")
+        {
+            Content = new StringContent("""{"displayConcealedNames":false}""", System.Text.Encoding.UTF8, "application/json"),
+        };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        using var response = await httpClient.SendAsync(request, ct);
+        if (response.IsSuccessStatusCode)
+        {
+            return true;
+        }
+
+        var responseBody = await response.Content.ReadAsStringAsync(ct);
+        var summary = Summarize(responseBody);
+
+        if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+        {
+            throw new GraphPermissionDeniedException($"Report settings update failed: {summary}");
+        }
+        throw new InvalidOperationException($"Report settings update failed: {summary}");
+    }
+
     // Exchange Online's Connect-ExchangeOnline -Organization parameter needs
     // the tenant's *.onmicrosoft.com domain, not the tenant ID GUID
     // Customer.TenantId stores (that GUID works fine for Graph's own token

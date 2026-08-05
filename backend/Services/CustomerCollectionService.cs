@@ -73,7 +73,28 @@ public class CustomerCollectionService(
                     && !graphUsers.Any(u => mailboxByUpn.ContainsKey(u.UserPrincipalName));
                 if (customer.MailboxDataConcealed)
                 {
-                    warnings.Add("mailbox data unavailable — report identities are concealed (Microsoft 365 admin center → Settings → Org Settings → Services → Reports → check \"Display Concealed user, group, and site names in all reports\" → Save; takes a few minutes to take effect, then re-collect)");
+                    // Same fix as the manual admin-center toggle, just done via Graph
+                    // directly — no reason to make every customer's admin click
+                    // through Settings by hand for something Spectra's own app
+                    // permissions can already flip. Still takes a few minutes to
+                    // propagate on Microsoft's side either way, so this run's
+                    // mailbox data stays concealed regardless; the next collection
+                    // picks up the change.
+                    try
+                    {
+                        await graphClient.EnsureReportIdentitiesRevealedAsync(token);
+                        warnings.Add("mailbox data unavailable — report identities were concealed; Spectra just disabled that setting automatically, it takes a few minutes to take effect, then re-collect");
+                    }
+                    catch (GraphPermissionDeniedException ex)
+                    {
+                        logger.LogWarning(ex, "ReportSettings.ReadWrite.All not granted for tenant {TenantId}", customer.TenantId);
+                        warnings.Add("mailbox data unavailable — report identities are concealed (ReportSettings.ReadWrite.All isn't granted yet, so Spectra can't fix this automatically; Microsoft 365 admin center → Settings → Org Settings → Services → Reports → check \"Display Concealed user, group, and site names in all reports\" → Save works too, then re-collect)");
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Failed to disable report concealment for tenant {TenantId}", customer.TenantId);
+                        warnings.Add($"mailbox data unavailable — report identities are concealed, and Spectra's automatic fix failed ({ex.Message}); Microsoft 365 admin center → Settings → Org Settings → Services → Reports → check \"Display Concealed user, group, and site names in all reports\" → Save works too, then re-collect");
+                    }
                 }
             }
             catch (GraphPermissionDeniedException ex)
