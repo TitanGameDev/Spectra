@@ -395,7 +395,11 @@ build_frontend() {
   # fetches its Azure AD config from the backend (/api/public/auth-config) at
   # load time instead of having it baked in at build time. Builds the same way
   # regardless of domain or Azure AD setup state.
-  ( cd "$SPECTRA_SRC_DIR/frontend" && npm ci --silent && npm run build --silent )
+  #
+  # VITE_API_BASE_URL is still needed though: Vite bakes it in at build time,
+  # and it must be "" so API calls are same-origin through the nginx proxy
+  # (see frontend/.env.example) rather than literally fetching "undefined/...".
+  ( cd "$SPECTRA_SRC_DIR/frontend" && npm ci --silent && VITE_API_BASE_URL="" npm run build --silent )
   rm -rf "${SPECTRA_WEB_ROOT:?}"/*
   cp -r "$SPECTRA_SRC_DIR/frontend/dist/." "$SPECTRA_WEB_ROOT/"
   ensure_world_traversable "$SPECTRA_WEB_ROOT"

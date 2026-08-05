@@ -105,7 +105,10 @@ dotnet publish "$SPECTRA_SRC_DIR/backend/Spectra.Api.csproj" -c Release -o "$SPE
 chown -R "$SPECTRA_SYSTEM_USER:$SPECTRA_SYSTEM_USER" "$SPECTRA_INSTALL_DIR/app"
 
 log "Building the frontend..."
-( cd "$SPECTRA_SRC_DIR/frontend" && npm ci --silent && npm run build --silent )
+# VITE_API_BASE_URL must be "" so API calls stay same-origin through the nginx
+# proxy — Vite bakes it in at build time (see frontend/.env.example), and an
+# unset value becomes the literal string "undefined" in the built bundle.
+( cd "$SPECTRA_SRC_DIR/frontend" && npm ci --silent && VITE_API_BASE_URL="" npm run build --silent )
 rm -rf "${SPECTRA_WEB_ROOT:?}"/*
 cp -r "$SPECTRA_SRC_DIR/frontend/dist/." "$SPECTRA_WEB_ROOT/"
 ensure_world_traversable "$SPECTRA_WEB_ROOT"
