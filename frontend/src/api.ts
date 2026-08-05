@@ -2,7 +2,7 @@ import type { IPublicClientApplication } from "@azure/msal-browser";
 import { InteractionRequiredAuthError } from "@azure/msal-browser";
 import { getApiScopes, directoryScopes, graphScopes } from "./authConfig";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL;
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "";
 const GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0";
 
 async function acquireToken(instance: IPublicClientApplication, scopes: string[]): Promise<string> {
