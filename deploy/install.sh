@@ -276,7 +276,10 @@ setup_app_user_and_dirs() {
     useradd --system --no-create-home --shell /usr/sbin/nologin "$SPECTRA_SYSTEM_USER"
   fi
 
-  mkdir -p "$SPECTRA_INSTALL_DIR/app" "$SPECTRA_DATA_DIR" "$SPECTRA_DATA_DIR/keys" "$SPECTRA_DATA_DIR/certs" "$SPECTRA_CONFIG_DIR" "$SPECTRA_WEB_ROOT"
+  # $SPECTRA_DATA_DIR/home becomes spectra.service's $HOME (see
+  # write_systemd_unit) — needed because ProtectHome=true hides the real
+  # /home/${SPECTRA_SYSTEM_USER} from the service entirely.
+  mkdir -p "$SPECTRA_INSTALL_DIR/app" "$SPECTRA_DATA_DIR" "$SPECTRA_DATA_DIR/keys" "$SPECTRA_DATA_DIR/certs" "$SPECTRA_DATA_DIR/home" "$SPECTRA_CONFIG_DIR" "$SPECTRA_WEB_ROOT"
   chown -R "$SPECTRA_SYSTEM_USER:$SPECTRA_SYSTEM_USER" "$SPECTRA_INSTALL_DIR/app" "$SPECTRA_DATA_DIR"
 }
 
@@ -511,6 +514,15 @@ PrivateTmp=true
 # password in Settings -> Database) permanently undecryptable.
 ReadWritePaths=${SPECTRA_DATA_DIR} ${SPECTRA_INSTALL_DIR}/app
 ProtectHome=true
+# ProtectHome=true hides /home entirely — including the 'spectra' system
+# user's own passwd-entry \$HOME (/home/${SPECTRA_SYSTEM_USER}, per useradd's
+# default, even though --no-create-home means it was never created), which
+# the ExchangeOnlineManagement PowerShell module needs a real writable value
+# for (its own cache/config files) or it fails to import at all ("Cannot bind
+# argument to parameter 'Path' because it is an empty string"). Pointed at a
+# subdirectory of \$SPECTRA_DATA_DIR instead, already covered by
+# ReadWritePaths above, rather than loosening ProtectHome.
+Environment=HOME=${SPECTRA_DATA_DIR}/home
 
 [Install]
 WantedBy=multi-user.target
