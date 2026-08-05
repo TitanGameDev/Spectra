@@ -13,7 +13,7 @@ Answer the three prompts — domain, HTTPS via Let's Encrypt (`yes` if you have 
 Then, **from your own machine** (not the server — this needs your Azure AD admin login, not root):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/TitanGameDev/Spectra/main/deploy/setup-azure-ad.sh | bash
+curl -fsSL https://raw.githubusercontent.com/TitanGameDev/Spectra/main/deploy/setup-azure-ad.sh | sudo bash
 ```
 
 Sign in to Azure when prompted, answer the domain prompt the same way you did above, then just hit Enter through the rest — it creates the two Entra app registrations Spectra needs and pushes the result straight into the server for you. Paste in the setup token from the first step when asked (running this on the server itself instead of your own machine skips that prompt — it just reads the token off disk).
