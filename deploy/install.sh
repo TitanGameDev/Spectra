@@ -385,8 +385,18 @@ EOF
 
 build_backend() {
   log "Publishing the backend (dotnet publish -c Release)..."
-  dotnet publish "$SPECTRA_SRC_DIR/backend/Spectra.Api.csproj" -c Release -o "$SPECTRA_INSTALL_DIR/app" --nologo
-  chown -R "$SPECTRA_SYSTEM_USER:$SPECTRA_SYSTEM_USER" "$SPECTRA_INSTALL_DIR/app"
+  # Staged into app.new and swapped in, not published straight into
+  # $SPECTRA_INSTALL_DIR/app — on a fresh install nothing has that directory
+  # open yet, but install.sh is also safe to rerun against an already-running
+  # instance (e.g. to pick up new deploy-script changes), and overwriting the
+  # live directory in place while spectra.service still holds the old
+  # Spectra.Api.dll/.pdb open can fail partway (see update.sh's equivalent
+  # step for the full explanation).
+  rm -rf "$SPECTRA_INSTALL_DIR/app.new"
+  dotnet publish "$SPECTRA_SRC_DIR/backend/Spectra.Api.csproj" -c Release -o "$SPECTRA_INSTALL_DIR/app.new" --nologo
+  chown -R "$SPECTRA_SYSTEM_USER:$SPECTRA_SYSTEM_USER" "$SPECTRA_INSTALL_DIR/app.new"
+  rm -rf "$SPECTRA_INSTALL_DIR/app"
+  mv "$SPECTRA_INSTALL_DIR/app.new" "$SPECTRA_INSTALL_DIR/app"
 }
 
 build_frontend() {
