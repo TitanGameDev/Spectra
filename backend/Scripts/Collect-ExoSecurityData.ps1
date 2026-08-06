@@ -60,13 +60,32 @@ try {
     try { $result.AntiPhishPolicies = @(Get-AntiPhishPolicy | Select-Object Name, IsDefault, Enabled, EnableTargetedUserProtection, EnableOrganizationDomainsProtection, EnableSpoofIntelligence, EnableMailboxIntelligence, EnableMailboxIntelligenceProtection, AuthenticationFailAction, HonorDmarcPolicy) } catch { }
     try { $result.SafeLinksPolicies = @(Get-SafeLinksPolicy | Select-Object Name, IsDefault, EnableSafeLinksForEmail, EnableSafeLinksForOffice, AllowClickThrough, TrackClicks) } catch { }
     try { $result.SafeAttachmentPolicies = @(Get-SafeAttachmentPolicy | Select-Object Name, IsDefault, Enable, Action) } catch { }
-    try { $result.HostedContentFilterPolicies = @(Get-HostedContentFilterPolicy | Select-Object Name, IsDefault, BulkThreshold, AllowedSenderDomains, SpamAction, HighConfidenceSpamAction, PhishSpamAction) } catch { }
+    # AllowedSenderDomains is a collection of SmtpDomainWithSubdomains objects,
+    # not plain strings — coerced the same way AccessRights is below, or
+    # ConvertTo-Json expands each one into a nested object instead of a
+    # string, which the C# DTO's List<string> can't parse at all.
+    try {
+        $result.HostedContentFilterPolicies = @(Get-HostedContentFilterPolicy | Select-Object `
+            Name, IsDefault, BulkThreshold, `
+            @{Name='AllowedSenderDomains'; Expression={ @($_.AllowedSenderDomains | ForEach-Object { $_.ToString() }) }}, `
+            SpamAction, HighConfidenceSpamAction, PhishSpamAction)
+    } catch { }
     try { $result.HostedOutboundSpamFilterPolicies = @(Get-HostedOutboundSpamFilterPolicy | Select-Object Name, IsDefault, AutoForwardingMode) } catch { }
     try { $result.MalwareFilterPolicies = @(Get-MalwareFilterPolicy | Select-Object Name, IsDefault, EnableFileFilter, ZapEnabled, EnableInternalSenderAdminNotifications, EnableExternalSenderAdminNotifications) } catch { }
     try { $result.DkimSigningConfigs = @(Get-DkimSigningConfig | Select-Object Domain, Enabled) } catch { }
     try { $result.TransportRules = @(Get-TransportRule | Select-Object Name, State, Priority, Description, SetSCL, DeleteMessage) } catch { }
-    try { $result.SharingPolicies = @(Get-SharingPolicy | Select-Object Name, Default, Enabled, Domains) } catch { }
-    try { $result.HostedConnectionFilterPolicies = @(Get-HostedConnectionFilterPolicy | Select-Object Name, IsDefault, IPAllowList) } catch { }
+    # Same reasoning as AllowedSenderDomains above — Domains/IPAllowList are
+    # collections of SharingPolicyDomain/IPRange objects, not plain strings.
+    try {
+        $result.SharingPolicies = @(Get-SharingPolicy | Select-Object `
+            Name, Default, Enabled, `
+            @{Name='Domains'; Expression={ @($_.Domains | ForEach-Object { $_.ToString() }) }})
+    } catch { }
+    try {
+        $result.HostedConnectionFilterPolicies = @(Get-HostedConnectionFilterPolicy | Select-Object `
+            Name, IsDefault, `
+            @{Name='IPAllowList'; Expression={ @($_.IPAllowList | ForEach-Object { $_.ToString() }) }})
+    } catch { }
     try { $result.AdminAuditLogConfig = Get-AdminAuditLogConfig | Select-Object UnifiedAuditLogIngestionEnabled } catch { }
     try { $result.AtpPolicyForO365 = Get-AtpPolicyForO365 | Select-Object EnableATPForSPOTeamsODB, EnableSafeDocs } catch { }
     try { $result.RemoteDomains = @(Get-RemoteDomain | Select-Object DomainName, AutoForwardEnabled) } catch { }

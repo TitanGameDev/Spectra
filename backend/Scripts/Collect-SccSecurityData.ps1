@@ -46,7 +46,16 @@ try {
 
     try { $result.DlpPolicies = @(Get-DlpCompliancePolicy | Select-Object Name, Enabled, Mode) } catch { }
     try { $result.RetentionPolicies = @(Get-RetentionCompliancePolicy | Select-Object Name, Enabled, Mode) } catch { }
-    try { $result.AlertPolicies = @(Get-ProtectionAlert | Select-Object Name, Category, Severity, Disabled, NotifyUser) } catch { }
+    # NotifyUser is normally already plain email address strings, but coerced
+    # explicitly anyway — same defensive reasoning as AllowedSenderDomains in
+    # Collect-ExoSecurityData.ps1: any object-typed element here would expand
+    # into a nested JSON object instead of a string, which List<string> can't
+    # parse.
+    try {
+        $result.AlertPolicies = @(Get-ProtectionAlert | Select-Object `
+            Name, Category, Severity, Disabled, `
+            @{Name='NotifyUser'; Expression={ @($_.NotifyUser | ForEach-Object { $_.ToString() }) }})
+    } catch { }
 }
 finally {
     # Disconnect-ExchangeOnline tears down IPPS sessions too — there's no
