@@ -270,9 +270,15 @@ export default function Azure() {
                   {(azure?.reservations.length ?? 0) === 0 ? (
                     <div className="panel-empty">
                       <p>
-                        No reservation data yet — this needs a separate, tenant-scoped <strong>Reservations Reader</strong>{" "}
-                        role, assigned via Azure Portal → Home → Reservations → Role assignment. This is a different
-                        screen from the subscription Reader role used for VMs/App Services above — see the README.
+                        {(azure?.virtualMachines.length ?? 0) === 0 ? (
+                          "No Azure virtual machines on this tenant, so reservations aren't collected — nothing to reserve capacity for."
+                        ) : (
+                          <>
+                            No reservation data yet — this needs a separate, tenant-scoped <strong>Reservations Reader</strong>{" "}
+                            role, assigned via Azure Portal → Home → Reservations → Role assignment. This is a different
+                            screen from the subscription Reader role used for VMs/App Services above — see the README.
+                          </>
+                        )}
                       </p>
                     </div>
                   ) : (

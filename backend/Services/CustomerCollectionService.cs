@@ -369,13 +369,13 @@ public class CustomerCollectionService(
             // Attempted on every run since there's no "role assigned" flag
             // Spectra can set itself here (unlike ExoRoleAssigned, this grant
             // happens entirely outside the app).
+            var vms = new List<AzureVirtualMachineDto>();
             try
             {
                 var armToken = await azureClient.GetAppTokenAsync(customer.TenantId);
                 var subscriptions = await azureClient.ListSubscriptionsAsync(armToken);
                 customer.AzureSubscriptionsJson = JsonSerializer.Serialize(subscriptions);
 
-                var vms = new List<AzureVirtualMachineDto>();
                 var appServices = new List<AzureAppServiceDto>();
                 foreach (var sub in subscriptions)
                 {
@@ -403,24 +403,37 @@ public class CustomerCollectionService(
             // Reservations need a separate, tenant-scoped RBAC role (Reservations
             // Reader) from the subscription-scoped Reader role above, so this is
             // attempted independently — a customer can easily have one grant but
-            // not the other.
-            try
+            // not the other. Skipped entirely for a customer with no VMs, though —
+            // reservations are an Azure-IaaS-specific concept (Reserved VM
+            // Instances/savings plans), and most customers here are Microsoft
+            // 365-cloud-only with no Azure infrastructure to reserve capacity for,
+            // so there's no reason to prompt for (or fail on) a role grant that
+            // wouldn't apply to them. If vms is empty because the collection above
+            // failed rather than because the tenant genuinely has none, this stays
+            // silent too — no evidence of a VM means no reservations warning,
+            // consistent either way. Doesn't touch any previously-collected
+            // AzureReservationsJson — a tenant that temporarily shows zero VMs
+            // this run shouldn't have its last-known reservation data wiped.
+            if (vms.Count > 0)
             {
-                var armToken = await azureClient.GetAppTokenAsync(customer.TenantId);
-                var reservations = await azureClient.ListReservationsAsync(armToken);
-                customer.AzureReservationsJson = JsonSerializer.Serialize(reservations);
-            }
-            catch (AzureAccessDeniedException ex)
-            {
-                logger.LogWarning(ex, "Reservations Reader role not yet assigned for tenant {TenantId}", customer.TenantId);
-                warnings.Add($"Reservation data unavailable — {ex.Message}");
-                customer.AzureReservationsJson = null;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Failed to collect reservation data for tenant {TenantId}", customer.TenantId);
-                warnings.Add($"Reservation data unavailable — {ex.Message}");
-                customer.AzureReservationsJson = null;
+                try
+                {
+                    var armToken = await azureClient.GetAppTokenAsync(customer.TenantId);
+                    var reservations = await azureClient.ListReservationsAsync(armToken);
+                    customer.AzureReservationsJson = JsonSerializer.Serialize(reservations);
+                }
+                catch (AzureAccessDeniedException ex)
+                {
+                    logger.LogWarning(ex, "Reservations Reader role not yet assigned for tenant {TenantId}", customer.TenantId);
+                    warnings.Add($"Reservation data unavailable — {ex.Message}");
+                    customer.AzureReservationsJson = null;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to collect reservation data for tenant {TenantId}", customer.TenantId);
+                    warnings.Add($"Reservation data unavailable — {ex.Message}");
+                    customer.AzureReservationsJson = null;
+                }
             }
 
             // Entra Apps — Graph-sourced, needs the separate Application.Read.All
