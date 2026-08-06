@@ -468,8 +468,14 @@ export default function Security() {
     };
   }, [instance, selectedCustomerId]);
 
-  const hasAnyMfaData = users?.some((u) => u.mfa !== null) ?? false;
-  const mfaRegisteredCount = users?.filter((u) => u.mfa?.isMfaRegistered).length ?? 0;
+  // A disabled or unlicensed account skews MFA coverage — same reasoning as
+  // the PDF security report already excluding disabled accounts (see
+  // SecurityReportPdfGenerator) — so the MFA sub-tab (and the Overview stat
+  // tile fed by these same two values) only counts accounts that are both
+  // enabled and actually assigned at least one license.
+  const mfaEligibleUsers = users?.filter((u) => u.accountEnabled && u.licenses.length > 0) ?? [];
+  const hasAnyMfaData = mfaEligibleUsers.some((u) => u.mfa !== null);
+  const mfaRegisteredCount = mfaEligibleUsers.filter((u) => u.mfa?.isMfaRegistered).length;
   const usersWithForwarding = users?.filter((u) => u.forwardingRules.length > 0) ?? [];
   const caPolicies = security?.conditionalAccessPolicies ?? [];
   const enabledCaCount = caPolicies.filter((p) => p.state === "enabled").length;
@@ -579,7 +585,7 @@ export default function Security() {
                   />
                   <StatTile
                     label="MFA coverage"
-                    value={hasAnyMfaData ? `${mfaRegisteredCount}/${users.length}` : "—"}
+                    value={hasAnyMfaData ? `${mfaRegisteredCount}/${mfaEligibleUsers.length}` : "—"}
                     caption={hasAnyMfaData ? "users registered" : "No data — needs Reports.Read.All"}
                   />
                   <StatTile
@@ -684,11 +690,13 @@ export default function Security() {
 
               {subTab === "mfa" && (
                 <>
-                  {!hasAnyMfaData && (
+                  {!hasAnyMfaData ? (
                     <p className="fine-print">
                       No MFA data yet — this needs the Reports.Read.All Graph permission. Grant consent again and
                       re-collect.
                     </p>
+                  ) : (
+                    <p className="fine-print">Showing enabled, licensed accounts only.</p>
                   )}
                   <div className="data-table-wrap">
                     <table className="data-table">
@@ -702,7 +710,7 @@ export default function Security() {
                         </tr>
                       </thead>
                       <tbody>
-                        {sortRows(users, sort, MFA_ACCESSORS).map((user) => (
+                        {sortRows(mfaEligibleUsers, sort, MFA_ACCESSORS).map((user) => (
                           <tr key={user.id}>
                             <td>{user.displayName ?? "—"}</td>
                             <td>{user.mail ?? user.userPrincipalName}</td>
