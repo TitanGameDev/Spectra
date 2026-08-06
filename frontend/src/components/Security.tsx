@@ -468,12 +468,19 @@ export default function Security() {
     };
   }, [instance, selectedCustomerId]);
 
-  // A disabled or unlicensed account skews MFA coverage — same reasoning as
-  // the PDF security report already excluding disabled accounts (see
+  // A disabled account skews MFA coverage — same reasoning as the PDF
+  // security report already excluding disabled accounts (see
   // SecurityReportPdfGenerator) — so the MFA sub-tab (and the Overview stat
-  // tile fed by these same two values) only counts accounts that are both
-  // enabled and actually assigned at least one license.
-  const mfaEligibleUsers = users?.filter((u) => u.accountEnabled && u.licenses.length > 0) ?? [];
+  // tile fed by these same two values) excludes those. Deliberately NOT also
+  // filtered to licensed users: unlike AccountEnabled (read straight off each
+  // user's own Graph record), a user's Licenses come from a separate,
+  // best-effort per-user Graph call during collection (see
+  // CustomerCollectionService.cs) that can fail independently for any one
+  // user — licenses.length === 0 there means "collection didn't get this
+  // user's licenses that run," not reliably "this user has none," so it was
+  // hiding real, actively-licensed users whose license lookup just happened
+  // to fail on the last sync.
+  const mfaEligibleUsers = users?.filter((u) => u.accountEnabled) ?? [];
   const hasAnyMfaData = mfaEligibleUsers.some((u) => u.mfa !== null);
   const mfaRegisteredCount = mfaEligibleUsers.filter((u) => u.mfa?.isMfaRegistered).length;
   const usersWithForwarding = users?.filter((u) => u.forwardingRules.length > 0) ?? [];
@@ -696,7 +703,7 @@ export default function Security() {
                       re-collect.
                     </p>
                   ) : (
-                    <p className="fine-print">Showing enabled, licensed accounts only.</p>
+                    <p className="fine-print">Showing enabled accounts only.</p>
                   )}
                   <div className="data-table-wrap">
                     <table className="data-table">
