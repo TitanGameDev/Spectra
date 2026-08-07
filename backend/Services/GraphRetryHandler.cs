@@ -45,9 +45,19 @@ public class GraphRetryHandler(ILogger<GraphRetryHandler> logger, CollectionProg
     private static TimeSpan GetRetryDelay(HttpResponseMessage response)
     {
         var retryAfter = response.Headers.RetryAfter;
-        var delay = retryAfter?.Delta
-            ?? (retryAfter?.Date.HasValue == true ? retryAfter.Date.Value - DateTimeOffset.UtcNow : null)
-            ?? MinDelay;
+        TimeSpan delay;
+        if (retryAfter?.Delta is { } fixedDelta)
+        {
+            delay = fixedDelta;
+        }
+        else if (retryAfter?.Date is { } date)
+        {
+            delay = date - DateTimeOffset.UtcNow;
+        }
+        else
+        {
+            delay = MinDelay;
+        }
         return delay < MinDelay ? MinDelay : delay > MaxDelay ? MaxDelay : delay;
     }
 
