@@ -33,6 +33,7 @@
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
     <PackageReference Include="QuestPDF" Version="2026.7.1" />
+    <PackageReference Include="ClosedXML" Version="0.105.1" />
   </ItemGroup>
 
 </Project>
