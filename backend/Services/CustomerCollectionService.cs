@@ -169,6 +169,20 @@ public class CustomerCollectionService(
                 warnings.Add($"mailbox data unavailable — {ex.Message}");
             }
 
+            // MFA is only ever surfaced for enabled accounts (Security.tsx's
+            // MFA sub-tab already filters to accountEnabled, same reasoning
+            // as the PDF report — a disabled account can't sign in, so its
+            // MFA state isn't meaningful), so there's no reason to spend a
+            // Graph call per disabled account on data nobody looks at — cuts
+            // real request volume on tenants with a lot of stale/disabled
+            // accounts, meaning less throttling pressure on the calls that
+            // do matter. Licenses/inbox rules above and below stay on the
+            // full list — a disabled account still holding a paid license
+            // (cost waste) or a forwarding rule (possible compromise
+            // remnant) is worth surfacing, unlike MFA on an account that
+            // can't sign in at all.
+            var enabledUsers = graphUsers.Where(u => u.AccountEnabled).ToList();
+
             var mfaByUserId = new Dictionary<string, GraphMfaDto>();
             var mfaPermissionDenied = false;
             var mfaFailureCount = 0;
@@ -178,7 +192,7 @@ public class CustomerCollectionService(
             // /authentication/methods has a noticeably tighter per-app Graph
             // throttle, and GraphRetryHandler already absorbs occasional 429s;
             // this just means fewer requests need retrying in the first place.
-            await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 2 }, async (u, ct) =>
+            await Parallel.ForEachAsync(enabledUsers, new ParallelOptions { MaxDegreeOfParallelism = 2 }, async (u, ct) =>
             {
                 try
                 {
@@ -197,7 +211,7 @@ public class CustomerCollectionService(
                 finally
                 {
                     var n = Interlocked.Increment(ref mfaChecked);
-                    progressTracker.Report($"Checked MFA for {u.DisplayName ?? u.UserPrincipalName} ({n} of {graphUsers.Count})");
+                    progressTracker.Report($"Checked MFA for {u.DisplayName ?? u.UserPrincipalName} ({n} of {enabledUsers.Count})");
                 }
             });
             if (mfaPermissionDenied)
