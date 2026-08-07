@@ -18,6 +18,8 @@ import {
   getAzureAdStatus,
   saveAzureAdConfig,
   getCollectionProgress,
+  syncAllCustomers,
+  getSyncAllStatus,
   type GraphGroup,
   type SettingsResponse,
   type Customer,
@@ -26,6 +28,7 @@ import {
   type UpdateStatusResponse,
   type AzureAdStatus,
   type CollectionProgressLine,
+  type BulkSyncStatus,
 } from "../api";
 
 const DEFAULT_PORTS: Record<DatabaseType, string> = { sqlserver: "1433", mysql: "3306" };
@@ -59,6 +62,9 @@ export default function Settings() {
   const [collectingId, setCollectingId] = useState<number | null>(null);
   const [collectError, setCollectError] = useState<string | null>(null);
   const [progressLines, setProgressLines] = useState<Record<number, CollectionProgressLine[]>>({});
+  const [syncingAll, setSyncingAll] = useState(false);
+  const [syncAllStatus, setSyncAllStatus] = useState<BulkSyncStatus | null>(null);
+  const [syncAllError, setSyncAllError] = useState<string | null>(null);
   const [consentError, setConsentError] = useState<string | null>(null);
   const [azureCommandError, setAzureCommandError] = useState<string | null>(null);
   const [azureCommandCopiedId, setAzureCommandCopiedId] = useState<number | null>(null);
@@ -264,6 +270,62 @@ export default function Settings() {
       await progressDone;
       setCollectingId(null);
     }
+  };
+
+  // Runs CollectAllAsync for every customer in the background (see
+  // BulkSyncStatusTracker.cs) — the POST returns immediately, so this polls
+  // /sync-all/status for overall progress ("3 of 12: Acme Corp") and, for
+  // whichever customer is currently active, chains into the same
+  // per-customer terminal feed handleCollect uses above.
+  const handleSyncAll = async () => {
+    setSyncingAll(true);
+    setSyncAllError(null);
+    setSyncAllStatus(null);
+
+    try {
+      await syncAllCustomers(instance);
+    } catch (err) {
+      setSyncAllError(err instanceof Error ? err.message : "Failed to start sync");
+      setSyncingAll(false);
+      return;
+    }
+
+    let activeCustomerId: number | null = null;
+    let after = 0;
+    let running = true;
+    while (running) {
+      try {
+        const status = await getSyncAllStatus(instance);
+        setSyncAllStatus(status);
+        running = status.isRunning;
+
+        if (status.currentCustomerId !== null) {
+          if (status.currentCustomerId !== activeCustomerId) {
+            activeCustomerId = status.currentCustomerId;
+            after = 0;
+            setProgressLines((prev) => ({ ...prev, [activeCustomerId!]: [] }));
+          }
+          const { lines } = await getCollectionProgress(instance, activeCustomerId, after);
+          if (lines.length > 0) {
+            after = lines[lines.length - 1].seq;
+            const id = activeCustomerId;
+            setProgressLines((prev) => ({ ...prev, [id]: [...(prev[id] ?? []), ...lines] }));
+          }
+        }
+      } catch {
+        // Transient — keep polling until the run itself reports done.
+      }
+      if (running) {
+        await new Promise((resolve) => setTimeout(resolve, 700));
+      }
+    }
+
+    try {
+      setCustomers(await getCustomers(instance));
+    } catch (err) {
+      setCustomersError(err instanceof Error ? err.message : "Failed to load customers");
+    }
+    setSyncingAll(false);
   };
 
   const handleGrantConsent = async (customerId: number) => {
@@ -513,11 +575,16 @@ export default function Settings() {
       <div className="settings-panel">
         <div className="settings-panel-header">
           <h2>Customers</h2>
-          {!showAddCustomer && (
-            <button className="btn btn-primary btn-sm" onClick={() => setShowAddCustomer(true)}>
-              + Add Customer
+          <div className="settings-actions">
+            <button className="btn btn-ghost btn-sm" onClick={handleSyncAll} disabled={syncingAll || customers.length === 0}>
+              {syncingAll ? "Syncing…" : "Sync all now"}
             </button>
-          )}
+            {!showAddCustomer && (
+              <button className="btn btn-primary btn-sm" onClick={() => setShowAddCustomer(true)}>
+                + Add Customer
+              </button>
+            )}
+          </div>
         </div>
         <p className="settings-hint">
           Adding a customer collects their Entra ID users immediately via app-only Graph access. Their tenant admin
@@ -525,6 +592,14 @@ export default function Settings() {
         </p>
 
         {customersError && <p className="login-error">{customersError}</p>}
+        {syncAllError && <p className="login-error">{syncAllError}</p>}
+        {syncingAll && syncAllStatus && (
+          <p className="fine-print">
+            <span className="status-dot status-dot-checking" aria-hidden="true" />
+            Syncing {Math.min(syncAllStatus.completed + 1, syncAllStatus.total)} of {syncAllStatus.total}
+            {syncAllStatus.currentCustomerName && `: ${syncAllStatus.currentCustomerName}`}
+          </p>
+        )}
 
         {showAddCustomer && (
           <form className="customer-add-form" onSubmit={handleAddCustomer}>
@@ -606,13 +681,13 @@ export default function Settings() {
                     <button
                       className="btn btn-ghost btn-sm"
                       onClick={() => handleCollect(customer.id)}
-                      disabled={collectingId === customer.id}
+                      disabled={collectingId === customer.id || syncingAll}
                     >
                       {collectingId === customer.id ? "Collecting…" : "Collect data"}
                     </button>
                   </div>
                 </div>
-                {collectingId === customer.id && (
+                {(collectingId === customer.id || (syncingAll && syncAllStatus?.currentCustomerId === customer.id)) && (
                   <pre
                     className="collect-terminal"
                     ref={(el) => {

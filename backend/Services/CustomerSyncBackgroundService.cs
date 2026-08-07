@@ -1,6 +1,3 @@
-using Microsoft.EntityFrameworkCore;
-using Spectra.Api.Data;
-
 namespace Spectra.Api.Services;
 
 // Runs CustomerCollectionService for every customer on a timer, so security
@@ -59,45 +56,24 @@ public class CustomerSyncBackgroundService(
 
     private async Task SyncAllCustomersAsync(CancellationToken ct)
     {
-        // A fresh scope per cycle (not per customer) — CustomerCollectionService
-        // is Scoped because it depends on the scoped SpectraDbContext, and reusing
-        // one DbContext across a sequential loop of SaveChanges calls is a normal,
-        // supported pattern (no concurrent access, since nothing here runs in parallel).
+        // A fresh scope per cycle — CustomerCollectionService is Scoped
+        // because it depends on the scoped SpectraDbContext. CollectAllAsync
+        // is the same method the manual "Sync all now" button in Settings
+        // calls (see Program.cs) — one implementation, two triggers, same
+        // as CollectAsync itself already was.
         using var scope = scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<SpectraDbContext>();
         var collectionService = scope.ServiceProvider.GetRequiredService<CustomerCollectionService>();
 
-        List<Customer> customers;
         try
         {
-            customers = await db.Customers.ToListAsync(ct);
+            var count = await collectionService.CollectAllAsync(ct);
+            logger.LogInformation("Automatic sync finished ({Count} customer(s))", count);
         }
         catch (Exception ex)
         {
             // e.g. the active database was mid-cutover or briefly unreachable —
             // skip this cycle rather than crash the whole hosted service.
-            logger.LogError(ex, "Automatic sync couldn't load the customer list this cycle");
-            return;
+            logger.LogError(ex, "Automatic sync couldn't run this cycle");
         }
-
-        logger.LogInformation("Automatic sync starting for {Count} customer(s)", customers.Count);
-        foreach (var customer in customers)
-        {
-            if (ct.IsCancellationRequested)
-            {
-                break;
-            }
-
-            try
-            {
-                // CollectAsync saves internally — see CustomerCollectionService.
-                await collectionService.CollectAsync(customer);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Automatic sync failed for customer {CustomerId}", customer.Id);
-            }
-        }
-        logger.LogInformation("Automatic sync finished");
     }
 }

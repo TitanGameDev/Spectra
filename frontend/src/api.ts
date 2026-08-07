@@ -156,6 +156,26 @@ export function getCollectionProgress(
   return apiFetch<CollectionProgressResponse>(instance, `/api/customers/${customerId}/collect/progress?after=${after}`);
 }
 
+export interface BulkSyncStatus {
+  isRunning: boolean;
+  completed: number;
+  total: number;
+  currentCustomerId: number | null;
+  currentCustomerName: string | null;
+}
+
+// Starts CustomerCollectionService.CollectAllAsync in the background — the
+// response comes back immediately (or 409 if a sync is already running),
+// well before the sweep itself finishes. Settings polls getSyncAllStatus()
+// to track it instead of waiting on this call.
+export function syncAllCustomers(instance: IPublicClientApplication): Promise<{ started: boolean }> {
+  return apiFetch<{ started: boolean }>(instance, "/api/customers/sync-all", { method: "POST" });
+}
+
+export function getSyncAllStatus(instance: IPublicClientApplication): Promise<BulkSyncStatus> {
+  return apiFetch<BulkSyncStatus>(instance, "/api/customers/sync-all/status");
+}
+
 export function getConsentUrl(instance: IPublicClientApplication, customerId: number): Promise<{ consentUrl: string }> {
   return apiFetch(instance, `/api/customers/${customerId}/consent-url`);
 }
