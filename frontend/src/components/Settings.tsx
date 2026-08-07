@@ -9,6 +9,7 @@ import {
   createCustomer,
   collectCustomerData,
   getConsentUrl,
+  getAzureRoleCommand,
   getDatabaseStatus,
   saveDatabaseConnection,
   provisionDatabase,
@@ -56,6 +57,8 @@ export default function Settings() {
   const [collectingId, setCollectingId] = useState<number | null>(null);
   const [collectError, setCollectError] = useState<string | null>(null);
   const [consentError, setConsentError] = useState<string | null>(null);
+  const [azureCommandError, setAzureCommandError] = useState<string | null>(null);
+  const [azureCommandCopiedId, setAzureCommandCopiedId] = useState<number | null>(null);
 
   const [dbStatus, setDbStatus] = useState<DatabaseStatus | null>(null);
   const [dbStatusError, setDbStatusError] = useState<string | null>(null);
@@ -233,6 +236,23 @@ export default function Settings() {
       window.open(consentUrl, "_blank");
     } catch (err) {
       setConsentError(err instanceof Error ? err.message : "Failed to build the consent link");
+    }
+  };
+
+  // Unlike consent above, there's no URL Spectra can just open — Azure RBAC
+  // has no admin-consent flow, so the best available "one click" is copying
+  // a ready-to-run az CLI command for the customer's Azure admin to paste
+  // into Cloud Shell (or their own terminal, signed into that tenant with
+  // Owner/User Access Administrator rights) themselves.
+  const handleCopyAzureRoleCommand = async (customerId: number) => {
+    setAzureCommandError(null);
+    try {
+      const { command } = await getAzureRoleCommand(instance, customerId);
+      await navigator.clipboard.writeText(command);
+      setAzureCommandCopiedId(customerId);
+      setTimeout(() => setAzureCommandCopiedId((current) => (current === customerId ? null : current)), 2000);
+    } catch (err) {
+      setAzureCommandError(err instanceof Error ? err.message : "Failed to copy the Azure role command");
     }
   };
 
@@ -509,6 +529,7 @@ export default function Settings() {
 
         {collectError && <p className="login-error">{collectError}</p>}
         {consentError && <p className="login-error">{consentError}</p>}
+        {azureCommandError && <p className="login-error">{azureCommandError}</p>}
 
         {customers.length > 0 ? (
           <ul className="customer-list">
@@ -532,6 +553,13 @@ export default function Settings() {
                 <div className="settings-actions">
                   <button className="btn btn-ghost btn-sm" onClick={() => handleGrantConsent(customer.id)}>
                     Grant consent
+                  </button>
+                  <button
+                    className="btn btn-ghost btn-sm"
+                    onClick={() => handleCopyAzureRoleCommand(customer.id)}
+                    title="Copies an az CLI command that grants Spectra Reader access to every current and future Azure subscription in this tenant — run it once, signed into the customer's tenant with Owner/User Access Administrator rights."
+                  >
+                    {azureCommandCopiedId === customer.id ? "Copied!" : "Copy Azure access command"}
                   </button>
                   <button
                     className="btn btn-ghost btn-sm"
