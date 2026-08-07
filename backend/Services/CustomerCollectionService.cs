@@ -112,7 +112,12 @@ public class CustomerCollectionService(
 
             var mfaByUserId = new Dictionary<string, GraphMfaDto>();
             var mfaPermissionDenied = false;
-            await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (u, ct) =>
+            var mfaFailureCount = 0;
+            // Lower concurrency than the license/inbox-rules loops below —
+            // /authentication/methods has a noticeably tighter per-app Graph
+            // throttle, and GraphRetryHandler already absorbs occasional 429s;
+            // this just means fewer requests need retrying in the first place.
+            await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 2 }, async (u, ct) =>
             {
                 try
                 {
@@ -126,11 +131,16 @@ public class CustomerCollectionService(
                 catch (Exception ex)
                 {
                     logger.LogWarning(ex, "Failed to get authentication methods for {UserId} in tenant {TenantId}", u.Id, customer.TenantId);
+                    Interlocked.Increment(ref mfaFailureCount);
                 }
             });
             if (mfaPermissionDenied)
             {
                 warnings.Add("MFA data unavailable — UserAuthenticationMethod.Read.All isn't granted yet");
+            }
+            else if (mfaFailureCount > 0)
+            {
+                warnings.Add($"MFA data unavailable for {mfaFailureCount} user(s) — see logs");
             }
 
             try

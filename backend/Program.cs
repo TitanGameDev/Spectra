@@ -93,7 +93,11 @@ builder.Services.AddScoped<IClaimsTransformation, SpectraClaimsTransformation>()
 
 // Calls Graph as Spectra's own app registration (client-credentials flow)
 // against a specific customer tenant — see GraphAppClient.cs.
-builder.Services.AddHttpClient<GraphAppClient>();
+// GraphRetryHandler retries 429s honoring Retry-After — needed because
+// CustomerCollectionService fires several users' worth of concurrent Graph
+// calls per tenant (see its Parallel.ForEachAsync loops).
+builder.Services.AddTransient<GraphRetryHandler>();
+builder.Services.AddHttpClient<GraphAppClient>().AddHttpMessageHandler<GraphRetryHandler>();
 builder.Services.AddHttpClient<AzureResourceClient>();
 
 // Shells out to pwsh for Exchange Online PowerShell collection — no HttpClient
