@@ -156,7 +156,7 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
 
         var users = new List<GraphUserDto>();
         string? url =
-            "https://graph.microsoft.com/v1.0/users?$select=id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation,accountEnabled,createdDateTime,proxyAddresses&$top=999";
+            "https://graph.microsoft.com/v1.0/users?$select=id,displayName,mail,userPrincipalName,jobTitle,department,officeLocation,accountEnabled,createdDateTime,proxyAddresses,userType&$top=999";
 
         while (url is not null)
         {
@@ -176,6 +176,15 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
             {
                 foreach (var item in valueArray.EnumerateArray())
                 {
+                    // Guests (B2B-invited external accounts) aren't members of
+                    // this tenant's own domains — they don't show up in the
+                    // Microsoft 365 admin center's user list either, so
+                    // Spectra shouldn't track them as if they were.
+                    if (string.Equals(GetOptionalString(item, "userType"), "Guest", StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+
                     users.Add(new GraphUserDto(
                         item.GetProperty("id").GetString()!,
                         GetOptionalString(item, "displayName"),
