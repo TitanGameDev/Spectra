@@ -493,7 +493,7 @@ body {
   background: var(--surface);
   border: 1px solid var(--surface-border);
   box-shadow: var(--surface-shadow);
-  max-width: 32rem;
+  width: 100%;
 }
 
 .settings-panel h2 {
@@ -611,6 +611,7 @@ body {
   flex-direction: column;
   gap: 0.6rem;
   width: 100%;
+  max-width: 28rem;
   padding: 0.9rem;
   border-radius: 10px;
   background: var(--chip-bg);
@@ -627,8 +628,7 @@ body {
 
 .customer-list-item {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
   padding: 0.7rem 0;
   font-size: 0.9rem;
   border-top: 1px solid var(--divider);
@@ -638,9 +638,31 @@ body {
   border-top: none;
 }
 
-.customer-list-item-detailed {
-  align-items: flex-start;
+.customer-list-item-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
   gap: 1rem;
+}
+
+.customer-list-item-detailed .customer-list-item-row {
+  align-items: flex-start;
+}
+
+.collect-terminal {
+  margin: 0.75rem 0 0;
+  padding: 0.75rem 0.9rem;
+  max-height: 12rem;
+  overflow-y: auto;
+  font-family: ui-monospace, "SFMono-Regular", "Consolas", "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: #d6f5df;
+  background: #0d1117;
+  border: 1px solid var(--surface-border);
+  border-radius: 10px;
 }
 
 .customer-list-item-detailed .fine-print {

@@ -27,18 +27,24 @@ public class CustomerCollectionService(
     SccPowerShellClient sccClient,
     AzureResourceClient azureClient,
     CollectionLockRegistry lockRegistry,
+    CollectionProgressTracker progressTracker,
     ILogger<CustomerCollectionService> logger)
 {
     public async Task CollectAsync(Customer customer)
     {
         var gate = lockRegistry.GetLock(customer.Id);
         await gate.WaitAsync();
+        using var _ = progressTracker.Begin(customer.Id);
         try
         {
+            progressTracker.Report("Fetching user list…");
             var graphUsers = await graphClient.ListUsersAsync(customer.TenantId);
+            progressTracker.Report($"Found {graphUsers.Count} user(s).");
             var token = await graphClient.GetAppTokenAsync(customer.TenantId);
 
             var licensesByUserId = new Dictionary<string, List<GraphLicenseDto>>();
+            var licensesChecked = 0;
+            progressTracker.Report("Checking license assignments…");
             await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (u, ct) =>
             {
                 try
@@ -53,11 +59,17 @@ public class CustomerCollectionService(
                     // sink the rest of the tenant's collection.
                     logger.LogWarning(ex, "Failed to get license details for {UserId} in tenant {TenantId}", u.Id, customer.TenantId);
                 }
+                finally
+                {
+                    var n = Interlocked.Increment(ref licensesChecked);
+                    progressTracker.Report($"Checked licenses for {u.DisplayName ?? u.UserPrincipalName} ({n} of {graphUsers.Count})");
+                }
             });
 
             var warnings = new List<string>();
 
             Dictionary<string, GraphMailboxUsageDto> mailboxByUpn = new(StringComparer.OrdinalIgnoreCase);
+            progressTracker.Report("Checking mailbox usage…");
             try
             {
                 mailboxByUpn = await graphClient.GetMailboxUsageByUpnAsync(customer.TenantId, token);
@@ -112,7 +124,14 @@ public class CustomerCollectionService(
 
             var mfaByUserId = new Dictionary<string, GraphMfaDto>();
             var mfaPermissionDenied = false;
-            await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (u, ct) =>
+            var mfaFailureCount = 0;
+            var mfaChecked = 0;
+            progressTracker.Report("Checking MFA registration…");
+            // Lower concurrency than the license/inbox-rules loops below —
+            // /authentication/methods has a noticeably tighter per-app Graph
+            // throttle, and GraphRetryHandler already absorbs occasional 429s;
+            // this just means fewer requests need retrying in the first place.
+            await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 2 }, async (u, ct) =>
             {
                 try
                 {
@@ -126,13 +145,24 @@ public class CustomerCollectionService(
                 catch (Exception ex)
                 {
                     logger.LogWarning(ex, "Failed to get authentication methods for {UserId} in tenant {TenantId}", u.Id, customer.TenantId);
+                    Interlocked.Increment(ref mfaFailureCount);
+                }
+                finally
+                {
+                    var n = Interlocked.Increment(ref mfaChecked);
+                    progressTracker.Report($"Checked MFA for {u.DisplayName ?? u.UserPrincipalName} ({n} of {graphUsers.Count})");
                 }
             });
             if (mfaPermissionDenied)
             {
                 warnings.Add("MFA data unavailable — UserAuthenticationMethod.Read.All isn't granted yet");
             }
+            else if (mfaFailureCount > 0)
+            {
+                warnings.Add($"MFA data unavailable for {mfaFailureCount} user(s) — see logs");
+            }
 
+            progressTracker.Report("Checking Conditional Access policies…");
             try
             {
                 var policies = await graphClient.GetConditionalAccessPoliciesAsync(customer.TenantId, token);
@@ -151,6 +181,7 @@ public class CustomerCollectionService(
                 customer.ConditionalAccessPoliciesJson = null;
             }
 
+            progressTracker.Report("Checking Global Administrators…");
             try
             {
                 var globalAdmins = await graphClient.GetGlobalAdministratorsAsync(customer.TenantId, token);
@@ -169,6 +200,7 @@ public class CustomerCollectionService(
                 customer.GlobalAdminsJson = null;
             }
 
+            progressTracker.Report("Checking Security Defaults…");
             try
             {
                 customer.SecurityDefaultsEnabled = await graphClient.GetSecurityDefaultsEnabledAsync(customer.TenantId, token);
@@ -187,6 +219,7 @@ public class CustomerCollectionService(
             // SPF/DMARC DNS checks — live public DNS lookups, not Graph or EXO,
             // so the only real failure mode here is "couldn't resolve the
             // verified domain list", not a missing permission.
+            progressTracker.Report("Running SPF/DMARC DNS checks…");
             try
             {
                 var verifiedDomains = await graphClient.GetVerifiedDomainsAsync(customer.TenantId, token);
@@ -200,6 +233,7 @@ public class CustomerCollectionService(
                 customer.DnsRecordChecksJson = null;
             }
 
+            progressTracker.Report("Checking Secure Score…");
             try
             {
                 var secureScore = await graphClient.GetSecureScoreAsync(customer.TenantId, token);
@@ -236,6 +270,8 @@ public class CustomerCollectionService(
 
             var inboxRulesByUserId = new Dictionary<string, List<GraphInboxRuleDto>>();
             var inboxRulesPermissionDenied = false;
+            var inboxRulesChecked = 0;
+            progressTracker.Report("Checking inbox rules…");
             await Parallel.ForEachAsync(graphUsers, new ParallelOptions { MaxDegreeOfParallelism = 5 }, async (u, ct) =>
             {
                 try
@@ -250,6 +286,11 @@ public class CustomerCollectionService(
                 catch (Exception ex)
                 {
                     logger.LogWarning(ex, "Failed to get inbox rules for {UserId} in tenant {TenantId}", u.Id, customer.TenantId);
+                }
+                finally
+                {
+                    var n = Interlocked.Increment(ref inboxRulesChecked);
+                    progressTracker.Report($"Checked inbox rules for {u.DisplayName ?? u.UserPrincipalName} ({n} of {graphUsers.Count})");
                 }
             });
             if (inboxRulesPermissionDenied)
@@ -283,6 +324,7 @@ public class CustomerCollectionService(
             if (customer.ExoRoleAssigned)
             {
                 string? organizationDomain = null;
+                progressTracker.Report("Collecting Exchange Online configuration (this can take a minute)…");
                 try
                 {
                     organizationDomain = await graphClient.GetInitialDomainAsync(customer.TenantId, token)
@@ -339,6 +381,7 @@ public class CustomerCollectionService(
                 // other from running.
                 if (organizationDomain is not null)
                 {
+                    progressTracker.Report("Collecting Security & Compliance configuration…");
                     try
                     {
                         var scc = await sccClient.CollectAsync(organizationDomain);
@@ -370,6 +413,7 @@ public class CustomerCollectionService(
             // Spectra can set itself here (unlike ExoRoleAssigned, this grant
             // happens entirely outside the app).
             var vms = new List<AzureVirtualMachineDto>();
+            progressTracker.Report("Checking Azure subscriptions and resources…");
             try
             {
                 var armToken = await azureClient.GetAppTokenAsync(customer.TenantId);
@@ -438,6 +482,7 @@ public class CustomerCollectionService(
 
             // Entra Apps — Graph-sourced, needs the separate Application.Read.All
             // permission (see Customer.EntraAppRegistrationsJson).
+            progressTracker.Report("Checking Entra app registrations…");
             try
             {
                 customer.EntraAppRegistrationsJson = JsonSerializer.Serialize(await graphClient.ListApplicationsAsync(customer.TenantId, token));
@@ -458,6 +503,7 @@ public class CustomerCollectionService(
                 customer.EntraServicePrincipalsJson = null;
             }
 
+            progressTracker.Report("Saving results…");
             var existing = await db.CustomerUsers.Where(u => u.CustomerId == customer.Id).ToListAsync();
             db.CustomerUsers.RemoveRange(existing);
 
@@ -499,11 +545,15 @@ public class CustomerCollectionService(
             customer.LastSyncError = warnings.Count == 0
                 ? null
                 : $"Users and licenses synced, but some data is unavailable: {string.Join("; ", warnings)}.";
+            progressTracker.Report(warnings.Count == 0
+                ? $"Done — synced {graphUsers.Count} user(s)."
+                : $"Done — synced {graphUsers.Count} user(s) with {warnings.Count} warning(s).");
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Failed to collect data for customer {CustomerId} ({TenantId})", customer.Id, customer.TenantId);
             customer.LastSyncError = ex.Message;
+            progressTracker.Report($"Failed — {ex.Message}");
         }
 
         try

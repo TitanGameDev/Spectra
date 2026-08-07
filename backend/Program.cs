@@ -93,7 +93,14 @@ builder.Services.AddScoped<IClaimsTransformation, SpectraClaimsTransformation>()
 
 // Calls Graph as Spectra's own app registration (client-credentials flow)
 // against a specific customer tenant — see GraphAppClient.cs.
-builder.Services.AddHttpClient<GraphAppClient>();
+// GraphRetryHandler retries 429s honoring Retry-After — needed because
+// CustomerCollectionService fires several users' worth of concurrent Graph
+// calls per tenant (see its Parallel.ForEachAsync loops). CollectionProgressTracker
+// is the live progress feed Settings polls during a collection run — see
+// CollectionProgressTracker.cs.
+builder.Services.AddSingleton<CollectionProgressTracker>();
+builder.Services.AddTransient<GraphRetryHandler>();
+builder.Services.AddHttpClient<GraphAppClient>().AddHttpMessageHandler<GraphRetryHandler>();
 builder.Services.AddHttpClient<AzureResourceClient>();
 
 // Shells out to pwsh for Exchange Online PowerShell collection — no HttpClient
@@ -1004,6 +1011,20 @@ app.MapPost("/api/customers/{id:int}/collect", async (
         customer.LastSyncError,
         customer.CreatedAt,
         customer.CreatedByEmail,
+    });
+}).RequireAuthorization("AdminOnly");
+
+// Polled by Settings while a collect request above is in flight, to render a
+// live terminal-style feed instead of just a spinner — see
+// CollectionProgressTracker.cs. ?after= is the highest seq the caller has
+// already rendered, so each poll only returns new lines.
+app.MapGet("/api/customers/{id:int}/collect/progress", (int id, CollectionProgressTracker progressTracker, int after = 0) =>
+{
+    var (isRunning, lines) = progressTracker.GetSince(id, after);
+    return Results.Ok(new
+    {
+        isRunning,
+        lines = lines.Select(l => new { l.Seq, l.At, l.Message }),
     });
 }).RequireAuthorization("AdminOnly");
 
