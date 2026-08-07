@@ -17,6 +17,7 @@ import {
   requestUpdate,
   getAzureAdStatus,
   saveAzureAdConfig,
+  getCollectionProgress,
   type GraphGroup,
   type SettingsResponse,
   type Customer,
@@ -24,6 +25,7 @@ import {
   type DatabaseType,
   type UpdateStatusResponse,
   type AzureAdStatus,
+  type CollectionProgressLine,
 } from "../api";
 
 const DEFAULT_PORTS: Record<DatabaseType, string> = { sqlserver: "1433", mysql: "3306" };
@@ -56,6 +58,7 @@ export default function Settings() {
   const [addCustomerError, setAddCustomerError] = useState<string | null>(null);
   const [collectingId, setCollectingId] = useState<number | null>(null);
   const [collectError, setCollectError] = useState<string | null>(null);
+  const [progressLines, setProgressLines] = useState<Record<number, CollectionProgressLine[]>>({});
   const [consentError, setConsentError] = useState<string | null>(null);
   const [azureCommandError, setAzureCommandError] = useState<string | null>(null);
   const [azureCommandCopiedId, setAzureCommandCopiedId] = useState<number | null>(null);
@@ -212,15 +215,53 @@ export default function Settings() {
     }
   };
 
+  // Polls the live progress feed (CollectionProgressTracker.cs) while the
+  // collectCustomerData() request below is in flight — that request blocks
+  // until the whole collection run finishes, so this is what lets Settings
+  // show a terminal-style "checking user X of N" / "waiting on rate limit"
+  // feed instead of just a spinner for however long the run takes.
+  const pollCollectionProgress = async (customerId: number, isDone: () => boolean) => {
+    let after = 0;
+    while (!isDone()) {
+      try {
+        const { lines } = await getCollectionProgress(instance, customerId, after);
+        if (lines.length > 0) {
+          after = lines[lines.length - 1].seq;
+          setProgressLines((prev) => ({ ...prev, [customerId]: [...(prev[customerId] ?? []), ...lines] }));
+        }
+      } catch {
+        // Transient — the collect request's own result is authoritative, so
+        // just keep polling rather than surfacing this as an error.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 700));
+    }
+    // One last poll to catch any lines written just before the collect
+    // request resolved (e.g. the final "Done" line).
+    try {
+      const { lines } = await getCollectionProgress(instance, customerId, after);
+      if (lines.length > 0) {
+        setProgressLines((prev) => ({ ...prev, [customerId]: [...(prev[customerId] ?? []), ...lines] }));
+      }
+    } catch {
+      // Best-effort.
+    }
+  };
+
   const handleCollect = async (customerId: number) => {
     setCollectingId(customerId);
     setCollectError(null);
+    setProgressLines((prev) => ({ ...prev, [customerId]: [] }));
+
+    let done = false;
+    const progressDone = pollCollectionProgress(customerId, () => done);
     try {
       const updated = await collectCustomerData(instance, customerId);
       setCustomers((prev) => prev.map((c) => (c.id === customerId ? updated : c)));
     } catch (err) {
       setCollectError(err instanceof Error ? err.message : "Failed to collect data");
     } finally {
+      done = true;
+      await progressDone;
       setCollectingId(null);
     }
   };
@@ -535,40 +576,53 @@ export default function Settings() {
           <ul className="customer-list">
             {customers.map((customer) => (
               <li key={customer.id} className="customer-list-item customer-list-item-detailed">
-                <div>
-                  <span>{customer.name}</span>
-                  <p className="fine-print">
-                    Tenant {customer.tenantId} — added {new Date(customer.createdAt).toLocaleDateString()}
-                  </p>
-                  <p className="fine-print">
-                    <span
-                      className={`status-dot status-dot-${customer.consentGranted ? "connected" : "error"}`}
-                      aria-hidden="true"
-                    />
-                    {customer.consentGranted ? "Consent granted" : "Consent not granted"}
-                    {customer.lastSyncedAt && ` — last synced ${new Date(customer.lastSyncedAt).toLocaleString()}`}
-                  </p>
-                  {customer.lastSyncError && <p className="login-error">{customer.lastSyncError}</p>}
+                <div className="customer-list-item-row">
+                  <div>
+                    <span>{customer.name}</span>
+                    <p className="fine-print">
+                      Tenant {customer.tenantId} — added {new Date(customer.createdAt).toLocaleDateString()}
+                    </p>
+                    <p className="fine-print">
+                      <span
+                        className={`status-dot status-dot-${customer.consentGranted ? "connected" : "error"}`}
+                        aria-hidden="true"
+                      />
+                      {customer.consentGranted ? "Consent granted" : "Consent not granted"}
+                      {customer.lastSyncedAt && ` — last synced ${new Date(customer.lastSyncedAt).toLocaleString()}`}
+                    </p>
+                    {customer.lastSyncError && <p className="login-error">{customer.lastSyncError}</p>}
+                  </div>
+                  <div className="settings-actions">
+                    <button className="btn btn-ghost btn-sm" onClick={() => handleGrantConsent(customer.id)}>
+                      Grant consent
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => handleCopyAzureRoleCommand(customer.id)}
+                      title="Copies an az CLI command that grants Spectra Reader access to every current and future Azure subscription in this tenant — run it once, signed into the customer's tenant with Owner/User Access Administrator rights."
+                    >
+                      {azureCommandCopiedId === customer.id ? "Copied!" : "Copy Azure access command"}
+                    </button>
+                    <button
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => handleCollect(customer.id)}
+                      disabled={collectingId === customer.id}
+                    >
+                      {collectingId === customer.id ? "Collecting…" : "Collect data"}
+                    </button>
+                  </div>
                 </div>
-                <div className="settings-actions">
-                  <button className="btn btn-ghost btn-sm" onClick={() => handleGrantConsent(customer.id)}>
-                    Grant consent
-                  </button>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => handleCopyAzureRoleCommand(customer.id)}
-                    title="Copies an az CLI command that grants Spectra Reader access to every current and future Azure subscription in this tenant — run it once, signed into the customer's tenant with Owner/User Access Administrator rights."
+                {collectingId === customer.id && (
+                  <pre
+                    className="collect-terminal"
+                    ref={(el) => {
+                      if (el) el.scrollTop = el.scrollHeight;
+                    }}
                   >
-                    {azureCommandCopiedId === customer.id ? "Copied!" : "Copy Azure access command"}
-                  </button>
-                  <button
-                    className="btn btn-ghost btn-sm"
-                    onClick={() => handleCollect(customer.id)}
-                    disabled={collectingId === customer.id}
-                  >
-                    {collectingId === customer.id ? "Collecting…" : "Collect data"}
-                  </button>
-                </div>
+                    {(progressLines[customer.id] ?? []).map((line) => `[${new Date(line.at).toLocaleTimeString()}] ${line.message}`).join("\n") ||
+                      "Starting…"}
+                  </pre>
+                )}
               </li>
             ))}
           </ul>

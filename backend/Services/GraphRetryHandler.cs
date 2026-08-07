@@ -9,7 +9,7 @@ namespace Spectra.Api.Services;
 // CustomerCollectionService's Parallel.ForEachAsync loops) silently drops
 // whichever users got throttled — that's what was producing "—" instead of
 // "No" for MFA on users Graph never actually failed to have data for.
-public class GraphRetryHandler(ILogger<GraphRetryHandler> logger) : DelegatingHandler
+public class GraphRetryHandler(ILogger<GraphRetryHandler> logger, CollectionProgressTracker progressTracker) : DelegatingHandler
 {
     private const int MaxAttempts = 4;
     private static readonly TimeSpan MinDelay = TimeSpan.FromSeconds(1);
@@ -33,6 +33,7 @@ public class GraphRetryHandler(ILogger<GraphRetryHandler> logger) : DelegatingHa
             logger.LogInformation(
                 "Graph request throttled ({StatusCode}), retrying in {DelaySeconds}s (attempt {Attempt}/{MaxAttempts}): {Url}",
                 (int)response.StatusCode, delay.TotalSeconds, attempt, MaxAttempts, current.RequestUri);
+            progressTracker.Report($"Rate limited by Graph ({(int)response.StatusCode}) — waiting {delay.TotalSeconds:0}s before retrying…");
             response.Dispose();
             await Task.Delay(delay, ct);
 

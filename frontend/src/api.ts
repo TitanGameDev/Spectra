@@ -134,6 +134,28 @@ export function collectCustomerData(instance: IPublicClientApplication, customer
   return apiFetch<Customer>(instance, `/api/customers/${customerId}/collect`, { method: "POST" });
 }
 
+export interface CollectionProgressLine {
+  seq: number;
+  at: string;
+  message: string;
+}
+
+export interface CollectionProgressResponse {
+  isRunning: boolean;
+  lines: CollectionProgressLine[];
+}
+
+// Polled while a collectCustomerData() call above is in flight, to render a
+// live terminal-style feed — see CollectionProgressTracker.cs. `after` is
+// the highest seq already rendered, so each poll only returns new lines.
+export function getCollectionProgress(
+  instance: IPublicClientApplication,
+  customerId: number,
+  after: number,
+): Promise<CollectionProgressResponse> {
+  return apiFetch<CollectionProgressResponse>(instance, `/api/customers/${customerId}/collect/progress?after=${after}`);
+}
+
 export function getConsentUrl(instance: IPublicClientApplication, customerId: number): Promise<{ consentUrl: string }> {
   return apiFetch(instance, `/api/customers/${customerId}/consent-url`);
 }
