@@ -898,6 +898,31 @@ app.MapGet("/api/customers/{id:int}/consent-url", async (int id, SpectraDbContex
     return Results.Ok(new { consentUrl });
 }).RequireAuthorization("AdminOnly");
 
+// Azure RBAC is a completely separate trust model from Entra admin consent
+// above — there's no Graph permission that lets Spectra grant itself a role
+// assignment, since ARM requires the *caller* to already have
+// Microsoft.Authorization/roleAssignments/write on the target scope. This
+// can't be automated away, so the next best thing: a ready-to-run az CLI
+// command scoped at the tenant's root management group (id == the tenant
+// id itself, present for every tenant) rather than one subscription at a
+// time — a single run covers every current *and future* subscription in
+// the tenant, since RBAC inherits down the management group hierarchy.
+app.MapGet("/api/customers/{id:int}/azure-role-command", async (int id, SpectraDbContext db, IActiveAzureAdConfigProvider azureAdConfig) =>
+{
+    var customer = await db.Customers.FindAsync(id);
+    if (customer is null)
+    {
+        return Results.NotFound();
+    }
+
+    var clientId = azureAdConfig.BackendClientId ?? "";
+    var command =
+        $"az role assignment create --assignee \"{clientId}\" --assignee-principal-type ServicePrincipal " +
+        $"--role \"Reader\" --scope \"/providers/Microsoft.Management/managementGroups/{customer.TenantId}\"";
+
+    return Results.Ok(new { command });
+}).RequireAuthorization("AdminOnly");
+
 app.MapPost("/api/customers", async (
     CreateCustomerRequest request,
     ClaimsPrincipal user,

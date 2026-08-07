@@ -138,6 +138,14 @@ export function getConsentUrl(instance: IPublicClientApplication, customerId: nu
   return apiFetch(instance, `/api/customers/${customerId}/consent-url`);
 }
 
+// Azure RBAC has no admin-consent equivalent — this returns a ready-to-run az
+// CLI command (scoped at the tenant's root management group, so it covers
+// every current and future subscription) for the customer's Azure admin to
+// run themselves, rather than a URL Spectra can open on its own.
+export function getAzureRoleCommand(instance: IPublicClientApplication, customerId: number): Promise<{ command: string }> {
+  return apiFetch(instance, `/api/customers/${customerId}/azure-role-command`);
+}
+
 // Minimal per-customer shape for the customer switcher — every signed-in
 // user can see this, unlike the full admin Customers management list above.
 export interface CustomerSummary {
