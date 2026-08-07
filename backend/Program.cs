@@ -915,9 +915,16 @@ app.MapGet("/api/customers/{id:int}/azure-role-command", async (int id, SpectraD
         return Results.NotFound();
     }
 
+    // --assignee (an appId) resolves the service principal via its own Graph
+    // lookup and needs no principal-type hint — az CLI actually rejects
+    // --assignee-principal-type unless paired with --assignee-object-id
+    // instead ("usage error: --assignee-object-id GUID --assignee-principal-type
+    // TYPE"), which would mean resolving that tenant-specific object id
+    // ourselves first. Not worth the extra Graph round trip for what --assignee
+    // alone already does in one CLI-side step.
     var clientId = azureAdConfig.BackendClientId ?? "";
     var command =
-        $"az role assignment create --assignee \"{clientId}\" --assignee-principal-type ServicePrincipal " +
+        $"az role assignment create --assignee \"{clientId}\" " +
         $"--role \"Reader\" --scope \"/providers/Microsoft.Management/managementGroups/{customer.TenantId}\"";
 
     return Results.Ok(new { command });
