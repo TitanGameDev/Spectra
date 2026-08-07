@@ -54,7 +54,7 @@ public class CollectionProgressTracker
     {
         if (!sessions.TryGetValue(customerId, out var session))
         {
-            return (false, []);
+            return (false, new List<CollectionProgressLine>());
         }
         lock (session.Lines)
         {
