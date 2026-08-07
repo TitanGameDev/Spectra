@@ -20,6 +20,7 @@ import {
   getCollectionProgress,
   syncAllCustomers,
   getSyncAllStatus,
+  downloadMfaExport,
   type GraphGroup,
   type SettingsResponse,
   type Customer,
@@ -65,6 +66,8 @@ export default function Settings() {
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncAllStatus, setSyncAllStatus] = useState<BulkSyncStatus | null>(null);
   const [syncAllError, setSyncAllError] = useState<string | null>(null);
+  const [exportingMfa, setExportingMfa] = useState(false);
+  const [exportMfaError, setExportMfaError] = useState<string | null>(null);
   const [consentError, setConsentError] = useState<string | null>(null);
   const [azureCommandError, setAzureCommandError] = useState<string | null>(null);
   const [azureCommandCopiedId, setAzureCommandCopiedId] = useState<number | null>(null);
@@ -328,6 +331,18 @@ export default function Settings() {
     setSyncingAll(false);
   };
 
+  const handleExportMfa = async () => {
+    setExportingMfa(true);
+    setExportMfaError(null);
+    try {
+      await downloadMfaExport(instance);
+    } catch (err) {
+      setExportMfaError(err instanceof Error ? err.message : "Failed to generate export");
+    } finally {
+      setExportingMfa(false);
+    }
+  };
+
   const handleGrantConsent = async (customerId: number) => {
     setConsentError(null);
     try {
@@ -576,6 +591,9 @@ export default function Settings() {
         <div className="settings-panel-header">
           <h2>Customers</h2>
           <div className="settings-actions">
+            <button className="btn btn-ghost btn-sm" onClick={handleExportMfa} disabled={exportingMfa || customers.length === 0}>
+              {exportingMfa ? "Exporting…" : "Export MFA (Excel)"}
+            </button>
             <button className="btn btn-ghost btn-sm" onClick={handleSyncAll} disabled={syncingAll || customers.length === 0}>
               {syncingAll ? "Syncing…" : "Sync all now"}
             </button>
@@ -592,6 +610,7 @@ export default function Settings() {
         </p>
 
         {customersError && <p className="login-error">{customersError}</p>}
+        {exportMfaError && <p className="login-error">{exportMfaError}</p>}
         {syncAllError && <p className="login-error">{syncAllError}</p>}
         {syncingAll && syncAllStatus && (
           <p className="fine-print">

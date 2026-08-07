@@ -537,6 +537,14 @@ export function downloadCustomerUserReport(instance: IPublicClientApplication, c
   return downloadFile(instance, `/api/customers/${customerId}/users-report`, `${customerName} User Report ${dateStamp}.pdf`);
 }
 
+// One Excel workbook covering every customer, one worksheet per customer,
+// listing enabled users and their MFA registration — see
+// MfaExportExcelGenerator.cs.
+export function downloadMfaExport(instance: IPublicClientApplication): Promise<void> {
+  const dateStamp = new Date().toISOString().slice(0, 10);
+  return downloadFile(instance, "/api/customers/mfa-export", `MFA Export ${dateStamp}.xlsx`);
+}
+
 export type DatabaseType = "sqlserver" | "mysql";
 
 export interface DatabaseStatus {

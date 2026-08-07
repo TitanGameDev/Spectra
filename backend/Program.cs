@@ -549,6 +549,46 @@ app.MapGet("/api/customers/{id:int}/users-report", async (int id, SpectraDbConte
     return Results.File(pdfBytes, "application/pdf", fileName);
 }).RequireAuthorization();
 
+// One Excel workbook covering every customer at once, one worksheet per
+// customer, listing enabled users and their MFA registration — the
+// multi-tenant equivalent of the single-customer PDF above, for an admin
+// who wants every customer's MFA posture in one file instead of downloading
+// a report per customer. Same accountEnabled filtering as the MFA sub-tab
+// (Security.tsx) and the PDF report above — MFA state on a disabled
+// account isn't meaningful. Guests never reach here at all (already
+// excluded at collection, see GraphAppClient.ListUsersAsync).
+app.MapGet("/api/customers/mfa-export", async (SpectraDbContext db) =>
+{
+    var customers = await db.Customers.OrderBy(c => c.Name).ToListAsync();
+
+    var sheets = new List<MfaExportCustomerSheet>();
+    foreach (var customer in customers)
+    {
+        var users = await db.CustomerUsers
+            .Where(u => u.CustomerId == customer.Id && u.AccountEnabled)
+            .OrderBy(u => u.DisplayName)
+            .ToListAsync();
+
+        var rows = users.Select(u =>
+        {
+            var mfa = DeserializeMfa(u.MfaJson);
+            return new MfaExportUserRow(
+                DisplayName: u.DisplayName ?? u.UserPrincipalName,
+                Email: u.Mail ?? u.UserPrincipalName,
+                JobTitle: u.JobTitle,
+                Department: u.Department,
+                MfaRegistered: mfa?.IsMfaRegistered == true,
+                MfaMethods: mfa?.Methods ?? []);
+        }).ToList();
+
+        sheets.Add(new MfaExportCustomerSheet(customer.Name, rows));
+    }
+
+    var excelBytes = MfaExportExcelGenerator.Generate(sheets);
+    var fileName = $"MFA Export {DateTime.UtcNow:yyyy-MM-dd}.xlsx";
+    return Results.File(excelBytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", fileName);
+}).RequireAuthorization();
+
 app.MapGet("/api/customers/{id:int}/security", async (int id, SpectraDbContext db) =>
 {
     var customer = await db.Customers.FindAsync(id);
