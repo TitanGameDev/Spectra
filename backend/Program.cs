@@ -122,6 +122,7 @@ builder.Services.AddSingleton<DnsCheckClient>();
 // manual "Collect data" endpoints below and CustomerSyncBackgroundService's
 // scheduled runs.
 builder.Services.AddSingleton<CollectionLockRegistry>();
+builder.Services.AddSingleton<BulkSyncStatusTracker>();
 builder.Services.AddScoped<CustomerCollectionService>();
 
 // Runs CustomerCollectionService for every customer on a timer — see
@@ -419,6 +420,33 @@ app.MapGet("/api/customers", async (SpectraDbContext db) =>
         .ToListAsync();
     return Results.Ok(customers);
 }).RequireAuthorization("AdminOnly");
+
+// Runs in the background rather than blocking the response — a full sweep
+// over every customer (each with its own EXO/SCC PowerShell steps) can run
+// well past nginx's default proxy read timeout, unlike the single-customer
+// collect endpoint below. Settings polls /sync-all/status instead. Same
+// CollectAllAsync CustomerSyncBackgroundService's scheduled timer calls —
+// see CustomerCollectionService.cs.
+app.MapPost("/api/customers/sync-all", (IServiceScopeFactory scopeFactory, BulkSyncStatusTracker bulkSyncStatus) =>
+{
+    if (bulkSyncStatus.GetStatus().IsRunning)
+    {
+        return Results.Conflict(new { error = "A sync is already in progress." });
+    }
+
+    _ = Task.Run(async () =>
+    {
+        using var scope = scopeFactory.CreateScope();
+        var collectionService = scope.ServiceProvider.GetRequiredService<CustomerCollectionService>();
+        await collectionService.CollectAllAsync();
+    });
+
+    return Results.Accepted(value: new { started = true });
+}).RequireAuthorization("AdminOnly");
+
+app.MapGet("/api/customers/sync-all/status", (BulkSyncStatusTracker bulkSyncStatus) =>
+    Results.Ok(bulkSyncStatus.GetStatus())
+).RequireAuthorization("AdminOnly");
 
 app.MapGet("/api/customers/summary", async (SpectraDbContext db) =>
 {

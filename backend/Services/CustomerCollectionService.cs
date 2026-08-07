@@ -28,8 +28,55 @@ public class CustomerCollectionService(
     AzureResourceClient azureClient,
     CollectionLockRegistry lockRegistry,
     CollectionProgressTracker progressTracker,
+    BulkSyncStatusTracker bulkSyncStatus,
     ILogger<CustomerCollectionService> logger)
 {
+    // Runs CollectAsync for every customer, sequentially — same reasoning as
+    // CustomerSyncBackgroundService's scheduled cycles (EXO/SCC PowerShell
+    // sessions are capped per app/tenant, not worth spinning up several at
+    // once for a run nobody's actively waiting on synchronously). Used by
+    // both that scheduled timer and the manual "Sync all now" button in
+    // Settings, reported into BulkSyncStatusTracker either way. A no-op
+    // (returns 0) if a sync is already in progress, so a manual trigger
+    // can't stack a second sweep on top of a running one.
+    public async Task<int> CollectAllAsync(CancellationToken ct = default)
+    {
+        var customers = await db.Customers.ToListAsync(ct);
+        if (!bulkSyncStatus.TryStart(customers.Count))
+        {
+            return 0;
+        }
+
+        var synced = 0;
+        try
+        {
+            for (var i = 0; i < customers.Count; i++)
+            {
+                if (ct.IsCancellationRequested)
+                {
+                    break;
+                }
+
+                var customer = customers[i];
+                bulkSyncStatus.ReportCustomer(customer.Id, customer.Name, i);
+                try
+                {
+                    await CollectAsync(customer);
+                    synced++;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Sync-all failed for customer {CustomerId}", customer.Id);
+                }
+            }
+        }
+        finally
+        {
+            bulkSyncStatus.Finish();
+        }
+        return synced;
+    }
+
     public async Task CollectAsync(Customer customer)
     {
         var gate = lockRegistry.GetLock(customer.Id);
