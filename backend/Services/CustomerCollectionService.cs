@@ -564,6 +564,43 @@ public class CustomerCollectionService(
                 customer.EntraServicePrincipalsJson = null;
             }
 
+            // OneDrive/SharePoint — same Reports.Read.All permission as
+            // mailbox usage above, no new consent needed.
+            Dictionary<string, GraphOneDriveUsageDto> oneDriveByUpn = new(StringComparer.OrdinalIgnoreCase);
+            progressTracker.Report("Checking OneDrive usage…");
+            try
+            {
+                oneDriveByUpn = await graphClient.GetOneDriveUsageByUpnAsync(customer.TenantId, token);
+            }
+            catch (GraphPermissionDeniedException ex)
+            {
+                logger.LogWarning(ex, "Reports.Read.All not yet effective for tenant {TenantId} (OneDrive)", customer.TenantId);
+                warnings.Add("OneDrive data unavailable — Reports.Read.All isn't granted yet");
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to get OneDrive usage for tenant {TenantId}", customer.TenantId);
+                warnings.Add($"OneDrive data unavailable — {ex.Message}");
+            }
+
+            progressTracker.Report("Checking SharePoint sites…");
+            try
+            {
+                customer.SharePointSitesJson = JsonSerializer.Serialize(await graphClient.GetSharePointSiteUsageAsync(customer.TenantId, token));
+            }
+            catch (GraphPermissionDeniedException ex)
+            {
+                logger.LogWarning(ex, "Reports.Read.All not yet effective for tenant {TenantId} (SharePoint sites)", customer.TenantId);
+                warnings.Add("SharePoint site data unavailable — Reports.Read.All isn't granted yet");
+                customer.SharePointSitesJson = null;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to get SharePoint sites for tenant {TenantId}", customer.TenantId);
+                warnings.Add($"SharePoint site data unavailable — {ex.Message}");
+                customer.SharePointSitesJson = null;
+            }
+
             progressTracker.Report("Saving results…");
             var existing = await db.CustomerUsers.Where(u => u.CustomerId == customer.Id).ToListAsync();
             db.CustomerUsers.RemoveRange(existing);
@@ -573,6 +610,7 @@ public class CustomerCollectionService(
             {
                 var mailbox = mailboxByUpn.GetValueOrDefault(u.UserPrincipalName);
                 var mfa = mfaByUserId.GetValueOrDefault(u.Id);
+                var oneDrive = oneDriveByUpn.GetValueOrDefault(u.UserPrincipalName);
                 return new CustomerUser
                 {
                     CustomerId = customer.Id,
@@ -588,6 +626,12 @@ public class CustomerCollectionService(
                     MailboxSizeBytes = mailbox?.SizeBytes,
                     MailboxItemCount = mailbox?.ItemCount,
                     HasArchiveMailbox = mailbox?.HasArchive,
+                    OneDriveSiteUrl = oneDrive?.SiteUrl,
+                    OneDriveStorageUsedBytes = oneDrive?.StorageUsedBytes,
+                    OneDriveStorageAllocatedBytes = oneDrive?.StorageAllocatedBytes,
+                    OneDriveFileCount = oneDrive?.FileCount,
+                    OneDriveActiveFileCount = oneDrive?.ActiveFileCount,
+                    OneDriveLastActivityDate = oneDrive?.LastActivityDate,
                     LicensesJson = licensesByUserId.TryGetValue(u.Id, out var licenses) ? SerializeLicenses(licenses) : null,
                     MfaJson = mfa is null ? null : JsonSerializer.Serialize(mfa),
                     AliasesJson = ParseAliases(u.ProxyAddresses),

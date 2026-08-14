@@ -169,6 +169,13 @@ public class Customer
     public string? EntraAppRegistrationsJson { get; set; }
     public string? EntraServicePrincipalsJson { get; set; }
 
+    // SharePoint sites, tenant-wide — same Reports.Read.All permission as
+    // mailbox/OneDrive usage (GraphAppClient.GetSharePointSiteUsageAsync),
+    // no new consent needed. Array of {SiteId, SiteUrl, OwnerDisplayName,
+    // OwnerPrincipalName, RootWebTemplate, StorageUsedBytes,
+    // StorageAllocatedBytes, FileCount, ActiveFileCount, LastActivityDate}.
+    public string? SharePointSitesJson { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
     public required string CreatedByEmail { get; set; }
 }
