@@ -137,7 +137,7 @@ public class GraphPermissionDeniedException(string message) : Exception(message)
 // against that customer's tenant — but it does mean the customer's Entra
 // admin must have granted admin consent to Spectra's app registration first
 // (see the consent-url endpoint in Program.cs).
-public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider azureAdConfig)
+public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider azureAdConfig, ILogger<GraphAppClient> logger)
 {
     // Public so callers doing many per-user calls (e.g. license details across
     // a whole tenant) can acquire the app token once instead of once per call.
@@ -360,6 +360,12 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         var rows = ParseCsv(responseBody);
         if (rows.Count == 0)
         {
+            // A 200 with a genuinely empty body is unexpected — even a tenant with
+            // zero OneDrive usage should still get a header row back — so this is
+            // worth a server-side breadcrumb even though it fails soft to the user
+            // (same reasoning as the schema-mismatch case below).
+            logger.LogWarning("OneDrive usage report for tenant {TenantId} returned an empty response body ({Length} bytes): {Snippet}",
+                tenantId, responseBody.Length, TruncateForLog(responseBody));
             return usage;
         }
 
@@ -375,7 +381,10 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         if (upnIdx < 0)
         {
             // Unexpected schema (Microsoft has changed these column sets before) —
-            // fail soft with no data rather than throw on something cosmetic.
+            // fail soft with no data rather than throw on something cosmetic, but
+            // log what we actually got so it's diagnosable from server logs.
+            logger.LogWarning("OneDrive usage report for tenant {TenantId} had an unrecognized header: {Header}",
+                tenantId, string.Join(" | ", header));
             return usage;
         }
 
@@ -427,6 +436,11 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         var rows = ParseCsv(responseBody);
         if (rows.Count == 0)
         {
+            // See the equivalent OneDrive-report branch above — a 200 with a
+            // genuinely empty body is unexpected, so this is worth a breadcrumb
+            // even though it fails soft to the user.
+            logger.LogWarning("SharePoint site usage report for tenant {TenantId} returned an empty response body ({Length} bytes): {Snippet}",
+                tenantId, responseBody.Length, TruncateForLog(responseBody));
             return sites;
         }
 
@@ -443,6 +457,10 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         var lastActivityIdx = header.IndexOf("Last Activity Date");
         if (siteUrlIdx < 0)
         {
+            // Unexpected schema — fail soft with no data, but log what we
+            // actually got so it's diagnosable from server logs.
+            logger.LogWarning("SharePoint site usage report for tenant {TenantId} had an unrecognized header: {Header}",
+                tenantId, string.Join(" | ", header));
             return sites;
         }
 
@@ -1149,6 +1167,12 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
 
     // Graph/AAD error bodies are verbose JSON — pull out just the message for
     // the exception text that ends up in LastSyncError.
+    // Log breadcrumbs for report bodies that failed soft (see the OneDrive/
+    // SharePoint empty-response branches) — capped so a surprise HTML error
+    // page from a proxy in front of Graph can't blow up the log line.
+    private static string TruncateForLog(string text)
+        => text.Length <= 500 ? text : text[..500] + "…";
+
     private static string Summarize(string responseBody)
     {
         try
