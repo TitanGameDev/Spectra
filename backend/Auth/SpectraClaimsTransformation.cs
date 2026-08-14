@@ -80,12 +80,27 @@ public class SpectraClaimsTransformation(SpectraDbContext db, DatabaseHealth dat
             }
 
             var settings = await db.Settings.SingleOrDefaultAsync();
-            var tokenGroups = principal.FindAll("groups").Select(c => c.Value).ToHashSet();
+            // OrdinalIgnoreCase defensively — Graph and Azure AD both emit
+            // group Object IDs lowercase in practice, but nothing enforces
+            // that, and a case mismatch here would silently deny access
+            // rather than error.
+            var tokenGroups = principal.FindAll("groups").Select(c => c.Value).ToHashSet(StringComparer.OrdinalIgnoreCase);
             var isAdmin = user.IsBootstrapAdmin
                 || (settings?.AdminGroupId is { } adminGroupId && tokenGroups.Contains(adminGroupId));
 
+            // Diagnostics for "I'm in the group but Settings still isn't
+            // showing" support cases — surfaced via /api/me so an affected
+            // user can self-check without anyone needing to decode a raw
+            // JWT. _claim_names is how Azure AD flags the 200+ group
+            // "overage" case (the groups claim is dropped from the token
+            // entirely and replaced with a pointer to a Graph call instead)
+            // — see the README's admin-group setup section.
+            var groupsOverage = identity.HasClaim(c => c.Type == "_claim_names");
+
             databaseHealth.MarkHealthy();
             identity.AddClaim(new Claim(AdminClaimType, isAdmin ? "true" : "false"));
+            identity.AddClaim(new Claim("spectra_groups_count", tokenGroups.Count.ToString()));
+            identity.AddClaim(new Claim("spectra_groups_overage", groupsOverage ? "true" : "false"));
         }
         catch (Exception ex)
         {

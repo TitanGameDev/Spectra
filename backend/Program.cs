@@ -350,12 +350,22 @@ app.MapPost("/api/system/reset-to-sqlite", async (
 app.MapGet("/api/me", (ClaimsPrincipal user) =>
 {
     // Curated fields only — avoid handing the client the full raw claims set
-    // (tenant/object IDs, app IDs, etc.) it has no need for.
+    // (tenant/object IDs, app IDs, etc.) it has no need for. adminDiagnostics
+    // is the exception: deliberately minimal, non-secret self-check info
+    // (no group IDs) so a user who expects admin access but doesn't have it
+    // can tell whether their token even carries group claims at all, rather
+    // than everyone needing to decode a raw JWT to debug it — see
+    // SpectraClaimsTransformation.cs.
     return Results.Ok(new
     {
         name = user.FindFirstValue("name") ?? user.Identity?.Name,
         email = user.FindFirstValue(ClaimTypes.Upn) ?? user.FindFirstValue("preferred_username"),
         isAdmin = user.FindFirstValue("spectra_admin") == "true",
+        adminDiagnostics = new
+        {
+            groupsClaimCount = int.TryParse(user.FindFirstValue("spectra_groups_count"), out var count) ? count : 0,
+            groupsOverageDetected = user.FindFirstValue("spectra_groups_overage") == "true",
+        },
     });
 }).RequireAuthorization();
 
