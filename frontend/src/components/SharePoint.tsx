@@ -122,7 +122,13 @@ export default function SharePoint() {
                 <>
                   {(data?.sites.length ?? 0) === 0 ? (
                     <div className="panel-empty">
-                      <p>No SharePoint sites found for this customer, or Reports.Read.All isn't granted yet.</p>
+                      <p>
+                        No SharePoint sites collected for this customer yet. If Reports.Read.All is already granted
+                        and other data (mailbox usage, MFA, etc.) is syncing fine, this is most likely Microsoft
+                        still generating the report for the first time — that can take up to 48 hours after the
+                        first request. Check Settings → Customers for a specific warning if it's still empty after
+                        that.
+                      </p>
                     </div>
                   ) : (
                     <div className="data-table-wrap">
@@ -163,7 +169,12 @@ export default function SharePoint() {
                 <>
                   {(data?.oneDrives.length ?? 0) === 0 ? (
                     <div className="panel-empty">
-                      <p>No OneDrive data found for this customer, or Reports.Read.All isn't granted yet.</p>
+                      <p>
+                        No OneDrive data collected for this customer yet. If Reports.Read.All is already granted and
+                        other data is syncing fine, this is most likely Microsoft still generating the report for the
+                        first time — that can take up to 48 hours after the first request. Check Settings →
+                        Customers for a specific warning if it's still empty after that.
+                      </p>
                     </div>
                   ) : (
                     <div className="data-table-wrap">
