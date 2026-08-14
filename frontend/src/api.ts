@@ -79,6 +79,10 @@ export interface MeResponse {
   name: string | null;
   email: string | null;
   isAdmin: boolean;
+  adminDiagnostics: {
+    groupsClaimCount: number;
+    groupsOverageDetected: boolean;
+  };
 }
 
 export function getMe(instance: IPublicClientApplication): Promise<MeResponse> {

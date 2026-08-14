@@ -193,6 +193,26 @@ body {
   line-height: 1.4;
 }
 
+.admin-access-hint {
+  margin: -0.5rem 0 0;
+}
+
+.admin-access-hint summary {
+  font-size: 0.8rem;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  width: fit-content;
+}
+
+.admin-access-hint summary:hover {
+  color: var(--text-secondary);
+}
+
+.admin-access-hint .fine-print {
+  max-width: 40rem;
+  line-height: 1.5;
+}
+
 /* Dashboard */
 
 .dashboard {
