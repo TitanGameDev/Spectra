@@ -29,6 +29,18 @@ public class CustomerUser
     public int? MailboxItemCount { get; set; }
     public bool? HasArchiveMailbox { get; set; }
 
+    // OneDrive usage — same Reports API/permission as the mailbox fields
+    // above, same null-means-not-collected convention. OneDriveSiteUrl is
+    // null for a user who's never provisioned a OneDrive at all (not an
+    // error — just hasn't visited it yet), same as the others being null
+    // for "no data this row."
+    public string? OneDriveSiteUrl { get; set; }
+    public long? OneDriveStorageUsedBytes { get; set; }
+    public long? OneDriveStorageAllocatedBytes { get; set; }
+    public int? OneDriveFileCount { get; set; }
+    public int? OneDriveActiveFileCount { get; set; }
+    public DateTimeOffset? OneDriveLastActivityDate { get; set; }
+
     // JSON array of {SkuId, SkuPartNumber} — denormalized rather than a
     // related table for now; each user typically has only a handful of
     // licenses and nothing here needs to be queried/filtered by SKU yet.

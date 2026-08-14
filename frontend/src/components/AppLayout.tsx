@@ -12,6 +12,7 @@ const NAV_ITEMS = [
   { to: "/security", label: "Security" },
   { to: "/intune", label: "Intune" },
   { to: "/azure", label: "Azure" },
+  { to: "/sharepoint", label: "SharePoint" },
 ];
 
 export default function AppLayout() {

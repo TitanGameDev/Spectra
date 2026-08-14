@@ -265,6 +265,9 @@ namespace Spectra.Api.Migrations
                     b.Property<bool?>("SecurityDefaultsEnabled")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("SharePointSitesJson")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("TenantId")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -331,6 +334,24 @@ namespace Spectra.Api.Migrations
 
                     b.Property<string>("OfficeLocation")
                         .HasColumnType("TEXT");
+
+                    b.Property<int?>("OneDriveActiveFileCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("OneDriveFileCount")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTimeOffset?>("OneDriveLastActivityDate")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OneDriveSiteUrl")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long?>("OneDriveStorageAllocatedBytes")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long?>("OneDriveStorageUsedBytes")
+                        .HasColumnType("INTEGER");
 
                     b.Property<DateTimeOffset>("SyncedAt")
                         .HasColumnType("TEXT");

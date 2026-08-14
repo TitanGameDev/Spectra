@@ -7,6 +7,7 @@ import Overview from "./Overview";
 import Users from "./Users";
 import Security from "./Security";
 import Azure from "./Azure";
+import SharePoint from "./SharePoint";
 import PlaceholderPage from "./PlaceholderPage";
 import Settings from "./Settings";
 import DatabaseSetupScreen from "./DatabaseSetupScreen";
@@ -57,6 +58,7 @@ export default function AuthenticatedApp() {
                 }
               />
               <Route path="/azure" element={<Azure />} />
+              <Route path="/sharepoint" element={<SharePoint />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<Navigate to="/" replace />} />
             </Route>

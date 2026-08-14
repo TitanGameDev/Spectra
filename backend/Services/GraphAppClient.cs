@@ -24,6 +24,27 @@ public record GraphLicenseDto(string SkuId, string SkuPartNumber);
 
 public record GraphMailboxUsageDto(long? SizeBytes, int? ItemCount, bool? HasArchive);
 
+public record GraphOneDriveUsageDto(
+    string? SiteUrl,
+    string? OwnerDisplayName,
+    long? StorageUsedBytes,
+    long? StorageAllocatedBytes,
+    int? FileCount,
+    int? ActiveFileCount,
+    DateTimeOffset? LastActivityDate);
+
+public record GraphSharePointSiteDto(
+    string? SiteId,
+    string SiteUrl,
+    string? OwnerDisplayName,
+    string? OwnerPrincipalName,
+    string? RootWebTemplate,
+    long? StorageUsedBytes,
+    long? StorageAllocatedBytes,
+    int? FileCount,
+    int? ActiveFileCount,
+    DateTimeOffset? LastActivityDate);
+
 public record GraphMfaDto(bool IsMfaRegistered, bool IsMfaCapable, List<string> Methods);
 
 // The List<string> properties are declared nullable even though
@@ -309,6 +330,144 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         }
 
         return usage;
+    }
+
+    // Same "usage report" family, same Reports.Read.All permission, and the
+    // same CSV-only limitation as GetMailboxUsageByUpnAsync above — see that
+    // method's comment for why CSV is the only format these actually return.
+    // Keyed by owner UPN, joined against CustomerUser the same way mailbox
+    // usage is.
+    public async Task<Dictionary<string, GraphOneDriveUsageDto>> GetOneDriveUsageByUpnAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        var usage = new Dictionary<string, GraphOneDriveUsageDto>(StringComparer.OrdinalIgnoreCase);
+        const string url = "https://graph.microsoft.com/v1.0/reports/getOneDriveUsageAccountDetail(period='D7')";
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        using var response = await httpClient.SendAsync(request, ct);
+        var responseBody = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            var summary = Summarize(responseBody);
+            if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                throw new GraphPermissionDeniedException($"Graph OneDrive usage report failed: {summary}");
+            }
+            throw new InvalidOperationException($"Graph OneDrive usage report failed: {summary}");
+        }
+
+        var rows = ParseCsv(responseBody);
+        if (rows.Count == 0)
+        {
+            return usage;
+        }
+
+        var header = rows[0];
+        var upnIdx = header.IndexOf("Owner Principal Name");
+        var siteUrlIdx = header.IndexOf("Site URL");
+        var ownerNameIdx = header.IndexOf("Owner Display Name");
+        var storageUsedIdx = header.IndexOf("Storage Used (Byte)");
+        var storageAllocatedIdx = header.IndexOf("Storage Allocated (Byte)");
+        var fileCountIdx = header.IndexOf("File Count");
+        var activeFileCountIdx = header.IndexOf("Active File Count");
+        var lastActivityIdx = header.IndexOf("Last Activity Date");
+        if (upnIdx < 0)
+        {
+            // Unexpected schema (Microsoft has changed these column sets before) —
+            // fail soft with no data rather than throw on something cosmetic.
+            return usage;
+        }
+
+        for (var i = 1; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            if (row.Count <= upnIdx || string.IsNullOrEmpty(row[upnIdx]))
+            {
+                continue;
+            }
+
+            string? siteUrl = siteUrlIdx >= 0 && siteUrlIdx < row.Count && !string.IsNullOrEmpty(row[siteUrlIdx]) ? row[siteUrlIdx] : null;
+            string? ownerName = ownerNameIdx >= 0 && ownerNameIdx < row.Count && !string.IsNullOrEmpty(row[ownerNameIdx]) ? row[ownerNameIdx] : null;
+            long? storageUsed = storageUsedIdx >= 0 && storageUsedIdx < row.Count && long.TryParse(row[storageUsedIdx], out var su) ? su : null;
+            long? storageAllocated = storageAllocatedIdx >= 0 && storageAllocatedIdx < row.Count && long.TryParse(row[storageAllocatedIdx], out var sa) ? sa : null;
+            int? fileCount = fileCountIdx >= 0 && fileCountIdx < row.Count && int.TryParse(row[fileCountIdx], out var fc) ? fc : null;
+            int? activeFileCount = activeFileCountIdx >= 0 && activeFileCountIdx < row.Count && int.TryParse(row[activeFileCountIdx], out var afc) ? afc : null;
+            DateTimeOffset? lastActivity = lastActivityIdx >= 0 && lastActivityIdx < row.Count && DateTimeOffset.TryParse(row[lastActivityIdx], out var la) ? la : null;
+
+            usage[row[upnIdx]] = new GraphOneDriveUsageDto(siteUrl, ownerName, storageUsed, storageAllocated, fileCount, activeFileCount, lastActivity);
+        }
+
+        return usage;
+    }
+
+    // Same usage-report family/permission again — tenant-wide list rather
+    // than a per-user join, so returned as a plain list instead of a
+    // UPN-keyed dictionary.
+    public async Task<List<GraphSharePointSiteDto>> GetSharePointSiteUsageAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        var sites = new List<GraphSharePointSiteDto>();
+        const string url = "https://graph.microsoft.com/v1.0/reports/getSharePointSiteUsageDetail(period='D7')";
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        using var response = await httpClient.SendAsync(request, ct);
+        var responseBody = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            var summary = Summarize(responseBody);
+            if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                throw new GraphPermissionDeniedException($"Graph SharePoint site usage report failed: {summary}");
+            }
+            throw new InvalidOperationException($"Graph SharePoint site usage report failed: {summary}");
+        }
+
+        var rows = ParseCsv(responseBody);
+        if (rows.Count == 0)
+        {
+            return sites;
+        }
+
+        var header = rows[0];
+        var siteIdIdx = header.IndexOf("Site Id");
+        var siteUrlIdx = header.IndexOf("Site URL");
+        var ownerNameIdx = header.IndexOf("Owner Display Name");
+        var ownerUpnIdx = header.IndexOf("Owner Principal Name");
+        var templateIdx = header.IndexOf("Root Web Template");
+        var storageUsedIdx = header.IndexOf("Storage Used (Byte)");
+        var storageAllocatedIdx = header.IndexOf("Storage Allocated (Byte)");
+        var fileCountIdx = header.IndexOf("File Count");
+        var activeFileCountIdx = header.IndexOf("Active File Count");
+        var lastActivityIdx = header.IndexOf("Last Activity Date");
+        if (siteUrlIdx < 0)
+        {
+            return sites;
+        }
+
+        for (var i = 1; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            if (row.Count <= siteUrlIdx || string.IsNullOrEmpty(row[siteUrlIdx]))
+            {
+                continue;
+            }
+
+            string? siteId = siteIdIdx >= 0 && siteIdIdx < row.Count && !string.IsNullOrEmpty(row[siteIdIdx]) ? row[siteIdIdx] : null;
+            string? ownerName = ownerNameIdx >= 0 && ownerNameIdx < row.Count && !string.IsNullOrEmpty(row[ownerNameIdx]) ? row[ownerNameIdx] : null;
+            string? ownerUpn = ownerUpnIdx >= 0 && ownerUpnIdx < row.Count && !string.IsNullOrEmpty(row[ownerUpnIdx]) ? row[ownerUpnIdx] : null;
+            string? template = templateIdx >= 0 && templateIdx < row.Count && !string.IsNullOrEmpty(row[templateIdx]) ? row[templateIdx] : null;
+            long? storageUsed = storageUsedIdx >= 0 && storageUsedIdx < row.Count && long.TryParse(row[storageUsedIdx], out var su) ? su : null;
+            long? storageAllocated = storageAllocatedIdx >= 0 && storageAllocatedIdx < row.Count && long.TryParse(row[storageAllocatedIdx], out var sa) ? sa : null;
+            int? fileCount = fileCountIdx >= 0 && fileCountIdx < row.Count && int.TryParse(row[fileCountIdx], out var fc) ? fc : null;
+            int? activeFileCount = activeFileCountIdx >= 0 && activeFileCountIdx < row.Count && int.TryParse(row[activeFileCountIdx], out var afc) ? afc : null;
+            DateTimeOffset? lastActivity = lastActivityIdx >= 0 && lastActivityIdx < row.Count && DateTimeOffset.TryParse(row[lastActivityIdx], out var la) ? la : null;
+
+            sites.Add(new GraphSharePointSiteDto(siteId, row[siteUrlIdx], ownerName, ownerUpn, template, storageUsed, storageAllocated, fileCount, activeFileCount, lastActivity));
+        }
+
+        return sites;
     }
 
     // Minimal RFC4180-ish CSV parser — handles quoted fields, embedded commas,

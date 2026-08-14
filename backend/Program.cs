@@ -701,6 +701,44 @@ app.MapGet("/api/customers/{id:int}/azure", async (int id, SpectraDbContext db) 
     });
 }).RequireAuthorization();
 
+// SharePoint sites and per-user OneDrive usage — both sourced from the same
+// Reports API/permission (Reports.Read.All) as mailbox usage above, no new
+// consent needed (see GraphAppClient.GetSharePointSiteUsageAsync /
+// GetOneDriveUsageByUpnAsync). OneDrive is per-user so it's read straight
+// off CustomerUsers rather than a Customer-level JSON blob, same as
+// mailbox usage; enabled-only, same convention as the MFA sub-tab (a
+// disabled account's OneDrive usage isn't operationally relevant).
+app.MapGet("/api/customers/{id:int}/sharepoint", async (int id, SpectraDbContext db) =>
+{
+    var customer = await db.Customers.FindAsync(id);
+    if (customer is null)
+    {
+        return Results.NotFound();
+    }
+
+    var oneDrives = await db.CustomerUsers
+        .Where(u => u.CustomerId == id && u.AccountEnabled)
+        .OrderBy(u => u.DisplayName)
+        .Select(u => new
+        {
+            u.DisplayName,
+            u.UserPrincipalName,
+            u.OneDriveSiteUrl,
+            u.OneDriveStorageUsedBytes,
+            u.OneDriveStorageAllocatedBytes,
+            u.OneDriveFileCount,
+            u.OneDriveActiveFileCount,
+            u.OneDriveLastActivityDate,
+        })
+        .ToListAsync();
+
+    return Results.Ok(new
+    {
+        Sites = DeserializeExo<List<GraphSharePointSiteDto>>(customer.SharePointSitesJson) ?? [],
+        OneDrives = oneDrives,
+    });
+}).RequireAuthorization();
+
 // DLP/retention/alert policy checks sourced from Security & Compliance
 // PowerShell (Connect-IPPSSession, see SccPowerShellClient) — a sibling
 // session to the EXO one above, using the exact same certificate and Global
@@ -1796,6 +1834,7 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("AzureReservationsJson", "LONGTEXT NULL"),
             ("EntraAppRegistrationsJson", "LONGTEXT NULL"),
             ("EntraServicePrincipalsJson", "LONGTEXT NULL"),
+            ("SharePointSitesJson", "LONGTEXT NULL"),
         })
         {
             if (!await ColumnExistsAsync("Customers", column))
@@ -1826,6 +1865,12 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
                 AliasesJson LONGTEXT NULL,
                 ForwardingRulesJson LONGTEXT NULL,
                 InboxRulesJson LONGTEXT NULL,
+                OneDriveSiteUrl LONGTEXT NULL,
+                OneDriveStorageUsedBytes BIGINT NULL,
+                OneDriveStorageAllocatedBytes BIGINT NULL,
+                OneDriveFileCount INT NULL,
+                OneDriveActiveFileCount INT NULL,
+                OneDriveLastActivityDate DATETIME(6) NULL,
                 SyncedAt DATETIME(6) NOT NULL,
                 PRIMARY KEY (Id),
                 UNIQUE KEY IX_CustomerUsers_CustomerId_GraphUserId (CustomerId, GraphUserId)
@@ -1844,6 +1889,12 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("AliasesJson", "LONGTEXT NULL"),
             ("ForwardingRulesJson", "LONGTEXT NULL"),
             ("InboxRulesJson", "LONGTEXT NULL"),
+            ("OneDriveSiteUrl", "LONGTEXT NULL"),
+            ("OneDriveStorageUsedBytes", "BIGINT NULL"),
+            ("OneDriveStorageAllocatedBytes", "BIGINT NULL"),
+            ("OneDriveFileCount", "INT NULL"),
+            ("OneDriveActiveFileCount", "INT NULL"),
+            ("OneDriveLastActivityDate", "DATETIME(6) NULL"),
         })
         {
             if (!await ColumnExistsAsync("CustomerUsers", column))
@@ -1924,6 +1975,7 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("AzureReservationsJson", "nvarchar(max) NULL"),
             ("EntraAppRegistrationsJson", "nvarchar(max) NULL"),
             ("EntraServicePrincipalsJson", "nvarchar(max) NULL"),
+            ("SharePointSitesJson", "nvarchar(max) NULL"),
         })
         {
 #pragma warning disable EF1002
@@ -1953,6 +2005,12 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
                 AliasesJson nvarchar(max) NULL,
                 ForwardingRulesJson nvarchar(max) NULL,
                 InboxRulesJson nvarchar(max) NULL,
+                OneDriveSiteUrl nvarchar(max) NULL,
+                OneDriveStorageUsedBytes bigint NULL,
+                OneDriveStorageAllocatedBytes bigint NULL,
+                OneDriveFileCount int NULL,
+                OneDriveActiveFileCount int NULL,
+                OneDriveLastActivityDate datetimeoffset NULL,
                 SyncedAt datetimeoffset NOT NULL,
                 CONSTRAINT PK_CustomerUsers PRIMARY KEY (Id),
                 CONSTRAINT IX_CustomerUsers_CustomerId_GraphUserId UNIQUE (CustomerId, GraphUserId)
@@ -1971,6 +2029,12 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("AliasesJson", "nvarchar(max) NULL"),
             ("ForwardingRulesJson", "nvarchar(max) NULL"),
             ("InboxRulesJson", "nvarchar(max) NULL"),
+            ("OneDriveSiteUrl", "nvarchar(max) NULL"),
+            ("OneDriveStorageUsedBytes", "bigint NULL"),
+            ("OneDriveStorageAllocatedBytes", "bigint NULL"),
+            ("OneDriveFileCount", "int NULL"),
+            ("OneDriveActiveFileCount", "int NULL"),
+            ("OneDriveLastActivityDate", "datetimeoffset NULL"),
         })
         {
             // column/definition come from the hardcoded array above, never user input.

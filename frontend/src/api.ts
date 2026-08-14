@@ -504,6 +504,43 @@ export function getCustomerAzureResources(instance: IPublicClientApplication, cu
   return apiFetch<AzureResourceInfo>(instance, `/api/customers/${customerId}/azure`);
 }
 
+export interface SharePointSite {
+  siteId: string | null;
+  siteUrl: string;
+  ownerDisplayName: string | null;
+  ownerPrincipalName: string | null;
+  rootWebTemplate: string | null;
+  storageUsedBytes: number | null;
+  storageAllocatedBytes: number | null;
+  fileCount: number | null;
+  activeFileCount: number | null;
+  lastActivityDate: string | null;
+}
+
+export interface OneDriveUsage {
+  displayName: string | null;
+  userPrincipalName: string;
+  oneDriveSiteUrl: string | null;
+  oneDriveStorageUsedBytes: number | null;
+  oneDriveStorageAllocatedBytes: number | null;
+  oneDriveFileCount: number | null;
+  oneDriveActiveFileCount: number | null;
+  oneDriveLastActivityDate: string | null;
+}
+
+export interface SharePointInfo {
+  sites: SharePointSite[];
+  oneDrives: OneDriveUsage[];
+}
+
+// Sites and OneDrive usage, both sourced from the Reports API — see
+// GetSharePointSiteUsageAsync/GetOneDriveUsageByUpnAsync in
+// GraphAppClient.cs. No SharePoint admin-center tenant settings yet (that
+// needs SharePoint/PnP PowerShell, a separate follow-up — see README).
+export function getCustomerSharePoint(instance: IPublicClientApplication, customerId: number): Promise<SharePointInfo> {
+  return apiFetch<SharePointInfo>(instance, `/api/customers/${customerId}/sharepoint`);
+}
+
 // Downloads the branded PDF snapshot of a customer's security posture. Can't
 // go through apiFetch (it always parses the response as JSON) — fetches the
 // PDF as a blob instead, then triggers a normal browser file download via a
