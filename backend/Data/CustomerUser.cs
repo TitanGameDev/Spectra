@@ -73,7 +73,9 @@ public class CustomerUser
     // Teams activity — same Reports API/permission (Reports.Read.All) as the
     // mailbox/OneDrive fields above, same null-means-not-collected
     // convention. From getTeamsUserActivityUserDetail; counts are over the
-    // report's rolling 7-day window, not lifetime totals.
+    // report's rolling 30-day window, not lifetime totals — TeamsLastActivityDate
+    // is separately not windowed, so it can be more recent (or older) than
+    // what the 30-day counts would suggest.
     public int? TeamsChatMessageCount { get; set; }
     public int? TeamsPrivateChatMessageCount { get; set; }
     public int? TeamsCallCount { get; set; }

@@ -655,10 +655,21 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
     // GetOneDriveUsageByUpnAsync above — see that method's comment for why
     // CSV is the only format these actually return. Keyed by UPN, joined
     // against CustomerUser the same way OneDrive usage is.
+    //
+    // Deliberately D30, not the D7 used elsewhere in this file: for storage
+    // reports (mailbox/OneDrive/SharePoint) the period barely matters since
+    // those numbers are point-in-time snapshots, not counts scoped to the
+    // window. Teams' chat/call/meeting counts genuinely are summed over
+    // just the requested period, though, and D7 made every count read as 0
+    // for any tenant without hour-by-hour Teams usage — LastActivityDate is
+    // a separate, non-windowed field, so a stale D7 count next to a recent
+    // LastActivityDate looked like broken data rather than "just quiet this
+    // week." D30 is a much more representative "is this even being used"
+    // signal at the cost of being a slightly less "right now" one.
     public async Task<Dictionary<string, GraphTeamsActivityDto>> GetTeamsActivityByUpnAsync(string tenantId, string token, CancellationToken ct = default)
     {
         var usage = new Dictionary<string, GraphTeamsActivityDto>(StringComparer.OrdinalIgnoreCase);
-        const string url = "https://graph.microsoft.com/v1.0/reports/getTeamsUserActivityUserDetail(period='D7')";
+        const string url = "https://graph.microsoft.com/v1.0/reports/getTeamsUserActivityUserDetail(period='D30')";
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
