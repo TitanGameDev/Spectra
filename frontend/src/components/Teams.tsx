@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useMsal } from "@azure/msal-react";
 import { getCustomerTeams, type TeamsInfo, type Team, type TeamsActivityUsage } from "../api";
 import { useCustomer } from "../CustomerContext";
@@ -26,6 +26,7 @@ const TEAM_ACCESSORS: Record<string, (t: Team) => SortValue> = {
   name: (t) => t.displayName,
   visibility: (t) => t.visibility ?? "",
   archived: (t) => (t.isArchived ? 1 : 0),
+  sharepoint: (t) => (t.sharePointSiteUrl ? 1 : 0),
   channels: (t) => t.channels.length,
   owners: (t) => ownerNames(t),
   members: (t) => t.members.length,
@@ -48,6 +49,7 @@ export default function Teams() {
   const [loading, setLoading] = useState(true);
   const [subTab, setSubTab] = useState<SubTabKey>("teams");
   const [sort, setSort] = useState<SortState<string> | null>(null);
+  const [expandedTeamId, setExpandedTeamId] = useState<string | null>(null);
 
   const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
 
@@ -138,22 +140,78 @@ export default function Teams() {
                             <SortableHeader label="Team" columnKey="name" sort={sort} onSort={handleSort} />
                             <SortableHeader label="Visibility" columnKey="visibility" sort={sort} onSort={handleSort} />
                             <SortableHeader label="Archived" columnKey="archived" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="SharePoint" columnKey="sharepoint" sort={sort} onSort={handleSort} />
                             <SortableHeader label="Channels" columnKey="channels" sort={sort} onSort={handleSort} />
                             <SortableHeader label="Owners" columnKey="owners" sort={sort} onSort={handleSort} />
                             <SortableHeader label="Members" columnKey="members" sort={sort} onSort={handleSort} />
                           </tr>
                         </thead>
                         <tbody>
-                          {sortRows(data?.teams ?? [], sort, TEAM_ACCESSORS).map((t) => (
-                            <tr key={t.teamId}>
-                              <td title={t.description ?? undefined}>{t.displayName}</td>
-                              <td>{t.visibility ?? "—"}</td>
-                              <td>{t.isArchived === null ? "—" : t.isArchived ? "Yes" : "No"}</td>
-                              <td title={channelNames(t) || undefined}>{t.channels.length}</td>
-                              <td>{ownerNames(t) || "—"}</td>
-                              <td>{t.members.length}</td>
-                            </tr>
-                          ))}
+                          {sortRows(data?.teams ?? [], sort, TEAM_ACCESSORS).map((t) => {
+                            const expanded = expandedTeamId === t.teamId;
+                            return (
+                              <Fragment key={t.teamId}>
+                                <tr
+                                  className="data-table-row-clickable"
+                                  style={{ cursor: "pointer" }}
+                                  onClick={() => setExpandedTeamId(expanded ? null : t.teamId)}
+                                  aria-expanded={expanded}
+                                >
+                                  <td title={t.description ?? undefined}>
+                                    <span className={`sort-arrow${expanded ? " sort-arrow-active" : ""}`}>{expanded ? "▾" : "▸"}</span>{" "}
+                                    {t.displayName}
+                                  </td>
+                                  <td>{t.visibility ?? "—"}</td>
+                                  <td>{t.isArchived === null ? "—" : t.isArchived ? "Yes" : "No"}</td>
+                                  <td>
+                                    {t.sharePointSiteUrl ? (
+                                      <a
+                                        href={t.sharePointSiteUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        Open ↗
+                                      </a>
+                                    ) : (
+                                      "Not linked"
+                                    )}
+                                  </td>
+                                  <td title={channelNames(t) || undefined}>{t.channels.length}</td>
+                                  <td>{ownerNames(t) || "—"}</td>
+                                  <td>{t.members.length}</td>
+                                </tr>
+                                {expanded && (
+                                  <tr>
+                                    <td colSpan={7}>
+                                      {t.members.length === 0 ? (
+                                        <p className="fine-print">No members returned for this team.</p>
+                                      ) : (
+                                        <table className="data-table">
+                                          <thead>
+                                            <tr>
+                                              <th>Name</th>
+                                              <th>Email</th>
+                                              <th>Role</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody>
+                                            {t.members.map((m, i) => (
+                                              <tr key={`${t.teamId}-member-${i}`}>
+                                                <td>{m.displayName ?? "—"}</td>
+                                                <td>{m.email ?? "—"}</td>
+                                                <td>{m.roles.includes("owner") ? "Owner" : "Member"}</td>
+                                              </tr>
+                                            ))}
+                                          </tbody>
+                                        </table>
+                                      )}
+                                    </td>
+                                  </tr>
+                                )}
+                              </Fragment>
+                            );
+                          })}
                         </tbody>
                       </table>
                     </div>

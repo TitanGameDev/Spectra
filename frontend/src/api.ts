@@ -560,6 +560,7 @@ export interface Team {
   description: string | null;
   visibility: string | null;
   isArchived: boolean | null;
+  sharePointSiteUrl: string | null;
   channels: TeamChannel[];
   members: TeamMember[];
 }
