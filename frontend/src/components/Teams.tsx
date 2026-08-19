@@ -236,11 +236,11 @@ export default function Teams() {
                         <thead>
                           <tr>
                             <SortableHeader label="Name" columnKey="name" sort={sort} onSort={handleSort} />
-                            <SortableHeader label="Chat messages" columnKey="chat" sort={sort} onSort={handleSort} />
-                            <SortableHeader label="Private chat messages" columnKey="privateChat" sort={sort} onSort={handleSort} />
-                            <SortableHeader label="Calls" columnKey="calls" sort={sort} onSort={handleSort} />
-                            <SortableHeader label="Meetings" columnKey="meetings" sort={sort} onSort={handleSort} />
-                            <SortableHeader label="Last activity" columnKey="lastActivity" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Chat messages (30d)" columnKey="chat" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Private chats (30d)" columnKey="privateChat" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Calls (30d)" columnKey="calls" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Meetings (30d)" columnKey="meetings" sort={sort} onSort={handleSort} />
+                            <SortableHeader label="Last activity (all-time)" columnKey="lastActivity" sort={sort} onSort={handleSort} />
                           </tr>
                         </thead>
                         <tbody>
