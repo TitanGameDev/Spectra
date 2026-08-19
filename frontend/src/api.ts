@@ -541,6 +541,53 @@ export function getCustomerSharePoint(instance: IPublicClientApplication, custom
   return apiFetch<SharePointInfo>(instance, `/api/customers/${customerId}/sharepoint`);
 }
 
+export interface TeamChannel {
+  channelId: string | null;
+  displayName: string;
+  description: string | null;
+  membershipType: string | null;
+}
+
+export interface TeamMember {
+  displayName: string | null;
+  email: string | null;
+  roles: string[];
+}
+
+export interface Team {
+  teamId: string;
+  displayName: string;
+  description: string | null;
+  visibility: string | null;
+  isArchived: boolean | null;
+  channels: TeamChannel[];
+  members: TeamMember[];
+}
+
+export interface TeamsActivityUsage {
+  displayName: string | null;
+  userPrincipalName: string;
+  teamsChatMessageCount: number | null;
+  teamsPrivateChatMessageCount: number | null;
+  teamsCallCount: number | null;
+  teamsMeetingCount: number | null;
+  teamsLastActivityDate: string | null;
+}
+
+export interface TeamsInfo {
+  teams: Team[];
+  activity: TeamsActivityUsage[];
+}
+
+// Teams list (with channels + membership roster) and per-user Teams
+// activity — see GraphAppClient.GetTeamsAsync/GetTeamsActivityByUpnAsync.
+// Team.ReadBasic.All, Channel.ReadBasic.All, and TeamMember.Read.All are new
+// permissions on top of everything else Spectra collects — existing
+// customers need to re-grant consent before this returns data.
+export function getCustomerTeams(instance: IPublicClientApplication, customerId: number): Promise<TeamsInfo> {
+  return apiFetch<TeamsInfo>(instance, `/api/customers/${customerId}/teams`);
+}
+
 // Downloads the branded PDF snapshot of a customer's security posture. Can't
 // go through apiFetch (it always parses the response as JSON) — fetches the
 // PDF as a blob instead, then triggers a normal browser file download via a

@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { to: "/intune", label: "Intune" },
   { to: "/azure", label: "Azure" },
   { to: "/sharepoint", label: "SharePoint" },
+  { to: "/teams", label: "Teams" },
 ];
 
 export default function AppLayout() {

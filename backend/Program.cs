@@ -739,6 +739,41 @@ app.MapGet("/api/customers/{id:int}/sharepoint", async (int id, SpectraDbContext
     });
 }).RequireAuthorization();
 
+// Teams (list + channels + membership, tenant-wide) and per-user Teams
+// activity — see GraphAppClient.GetTeamsAsync/GetTeamsActivityByUpnAsync.
+// Activity is per-user so it's read straight off CustomerUsers rather than
+// a Customer-level JSON blob, same as mailbox/OneDrive usage; enabled-only,
+// same convention as the MFA and OneDrive sub-tabs.
+app.MapGet("/api/customers/{id:int}/teams", async (int id, SpectraDbContext db) =>
+{
+    var customer = await db.Customers.FindAsync(id);
+    if (customer is null)
+    {
+        return Results.NotFound();
+    }
+
+    var activity = await db.CustomerUsers
+        .Where(u => u.CustomerId == id && u.AccountEnabled)
+        .OrderBy(u => u.DisplayName)
+        .Select(u => new
+        {
+            u.DisplayName,
+            u.UserPrincipalName,
+            u.TeamsChatMessageCount,
+            u.TeamsPrivateChatMessageCount,
+            u.TeamsCallCount,
+            u.TeamsMeetingCount,
+            u.TeamsLastActivityDate,
+        })
+        .ToListAsync();
+
+    return Results.Ok(new
+    {
+        Teams = DeserializeExo<List<GraphTeamDto>>(customer.TeamsJson) ?? [],
+        Activity = activity,
+    });
+}).RequireAuthorization();
+
 // DLP/retention/alert policy checks sourced from Security & Compliance
 // PowerShell (Connect-IPPSSession, see SccPowerShellClient) — a sibling
 // session to the EXO one above, using the exact same certificate and Global
@@ -1835,6 +1870,7 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("EntraAppRegistrationsJson", "LONGTEXT NULL"),
             ("EntraServicePrincipalsJson", "LONGTEXT NULL"),
             ("SharePointSitesJson", "LONGTEXT NULL"),
+            ("TeamsJson", "LONGTEXT NULL"),
         })
         {
             if (!await ColumnExistsAsync("Customers", column))
@@ -1871,6 +1907,11 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
                 OneDriveFileCount INT NULL,
                 OneDriveActiveFileCount INT NULL,
                 OneDriveLastActivityDate DATETIME(6) NULL,
+                TeamsChatMessageCount INT NULL,
+                TeamsPrivateChatMessageCount INT NULL,
+                TeamsCallCount INT NULL,
+                TeamsMeetingCount INT NULL,
+                TeamsLastActivityDate DATETIME(6) NULL,
                 SyncedAt DATETIME(6) NOT NULL,
                 PRIMARY KEY (Id),
                 UNIQUE KEY IX_CustomerUsers_CustomerId_GraphUserId (CustomerId, GraphUserId)
@@ -1895,6 +1936,11 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("OneDriveFileCount", "INT NULL"),
             ("OneDriveActiveFileCount", "INT NULL"),
             ("OneDriveLastActivityDate", "DATETIME(6) NULL"),
+            ("TeamsChatMessageCount", "INT NULL"),
+            ("TeamsPrivateChatMessageCount", "INT NULL"),
+            ("TeamsCallCount", "INT NULL"),
+            ("TeamsMeetingCount", "INT NULL"),
+            ("TeamsLastActivityDate", "DATETIME(6) NULL"),
         })
         {
             if (!await ColumnExistsAsync("CustomerUsers", column))
@@ -1976,6 +2022,7 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("EntraAppRegistrationsJson", "nvarchar(max) NULL"),
             ("EntraServicePrincipalsJson", "nvarchar(max) NULL"),
             ("SharePointSitesJson", "nvarchar(max) NULL"),
+            ("TeamsJson", "nvarchar(max) NULL"),
         })
         {
 #pragma warning disable EF1002
@@ -2011,6 +2058,11 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
                 OneDriveFileCount int NULL,
                 OneDriveActiveFileCount int NULL,
                 OneDriveLastActivityDate datetimeoffset NULL,
+                TeamsChatMessageCount int NULL,
+                TeamsPrivateChatMessageCount int NULL,
+                TeamsCallCount int NULL,
+                TeamsMeetingCount int NULL,
+                TeamsLastActivityDate datetimeoffset NULL,
                 SyncedAt datetimeoffset NOT NULL,
                 CONSTRAINT PK_CustomerUsers PRIMARY KEY (Id),
                 CONSTRAINT IX_CustomerUsers_CustomerId_GraphUserId UNIQUE (CustomerId, GraphUserId)
@@ -2035,6 +2087,11 @@ static async Task ApplyExternalSchemaPatchesAsync(SpectraDbContext db, string pr
             ("OneDriveFileCount", "int NULL"),
             ("OneDriveActiveFileCount", "int NULL"),
             ("OneDriveLastActivityDate", "datetimeoffset NULL"),
+            ("TeamsChatMessageCount", "int NULL"),
+            ("TeamsPrivateChatMessageCount", "int NULL"),
+            ("TeamsCallCount", "int NULL"),
+            ("TeamsMeetingCount", "int NULL"),
+            ("TeamsLastActivityDate", "datetimeoffset NULL"),
         })
         {
             // column/definition come from the hardcoded array above, never user input.

@@ -176,6 +176,15 @@ public class Customer
     // StorageAllocatedBytes, FileCount, ActiveFileCount, LastActivityDate}.
     public string? SharePointSitesJson { get; set; }
 
+    // Teams, tenant-wide — needs Team.ReadBasic.All, Channel.ReadBasic.All,
+    // and TeamMember.Read.All, three genuinely new Graph application
+    // permissions, so existing customers need to re-grant consent before
+    // this starts returning data (see Settings → Customers → Grant
+    // consent). Array of {TeamId, DisplayName, Description, Visibility,
+    // IsArchived, Channels: [...], Members: [...]} —
+    // GraphAppClient.GetTeamsAsync.
+    public string? TeamsJson { get; set; }
+
     public DateTimeOffset CreatedAt { get; set; }
     public required string CreatedByEmail { get; set; }
 }

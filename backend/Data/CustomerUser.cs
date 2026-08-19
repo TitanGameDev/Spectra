@@ -70,5 +70,15 @@ public class CustomerUser
     // that field is just a filtered view of this one.
     public string? InboxRulesJson { get; set; }
 
+    // Teams activity — same Reports API/permission (Reports.Read.All) as the
+    // mailbox/OneDrive fields above, same null-means-not-collected
+    // convention. From getTeamsUserActivityUserDetail; counts are over the
+    // report's rolling 7-day window, not lifetime totals.
+    public int? TeamsChatMessageCount { get; set; }
+    public int? TeamsPrivateChatMessageCount { get; set; }
+    public int? TeamsCallCount { get; set; }
+    public int? TeamsMeetingCount { get; set; }
+    public DateTimeOffset? TeamsLastActivityDate { get; set; }
+
     public DateTimeOffset SyncedAt { get; set; }
 }
