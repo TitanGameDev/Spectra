@@ -601,6 +601,46 @@ public class CustomerCollectionService(
                 customer.SharePointSitesJson = null;
             }
 
+            // Teams — needs Team.ReadBasic.All, Channel.ReadBasic.All, and
+            // TeamMember.Read.All (list/channels/members), plus the same
+            // Reports.Read.All permission as the mailbox/OneDrive usage
+            // above (activity report). The first three are genuinely new
+            // permissions on top of everything else this service collects.
+            Dictionary<string, GraphTeamsActivityDto> teamsActivityByUpn = new(StringComparer.OrdinalIgnoreCase);
+            progressTracker.Report("Checking Teams activity…");
+            try
+            {
+                teamsActivityByUpn = await graphClient.GetTeamsActivityByUpnAsync(customer.TenantId, token);
+            }
+            catch (GraphPermissionDeniedException ex)
+            {
+                logger.LogWarning(ex, "Reports.Read.All not yet effective for tenant {TenantId} (Teams activity)", customer.TenantId);
+                warnings.Add("Teams activity data unavailable — Reports.Read.All isn't granted yet");
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to get Teams activity for tenant {TenantId}", customer.TenantId);
+                warnings.Add($"Teams activity data unavailable — {ex.Message}");
+            }
+
+            progressTracker.Report("Checking Teams…");
+            try
+            {
+                customer.TeamsJson = JsonSerializer.Serialize(await graphClient.GetTeamsAsync(customer.TenantId, token));
+            }
+            catch (GraphPermissionDeniedException ex)
+            {
+                logger.LogWarning(ex, "Team.ReadBasic.All/Channel.ReadBasic.All/TeamMember.Read.All not yet effective for tenant {TenantId} (Teams)", customer.TenantId);
+                warnings.Add("Teams data unavailable — Team.ReadBasic.All, Channel.ReadBasic.All, and TeamMember.Read.All aren't granted yet");
+                customer.TeamsJson = null;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to get Teams for tenant {TenantId}", customer.TenantId);
+                warnings.Add($"Teams data unavailable — {ex.Message}");
+                customer.TeamsJson = null;
+            }
+
             progressTracker.Report("Saving results…");
             var existing = await db.CustomerUsers.Where(u => u.CustomerId == customer.Id).ToListAsync();
             db.CustomerUsers.RemoveRange(existing);
@@ -611,6 +651,7 @@ public class CustomerCollectionService(
                 var mailbox = mailboxByUpn.GetValueOrDefault(u.UserPrincipalName);
                 var mfa = mfaByUserId.GetValueOrDefault(u.Id);
                 var oneDrive = oneDriveByUpn.GetValueOrDefault(u.UserPrincipalName);
+                var teamsActivity = teamsActivityByUpn.GetValueOrDefault(u.UserPrincipalName);
                 return new CustomerUser
                 {
                     CustomerId = customer.Id,
@@ -632,6 +673,11 @@ public class CustomerCollectionService(
                     OneDriveFileCount = oneDrive?.FileCount,
                     OneDriveActiveFileCount = oneDrive?.ActiveFileCount,
                     OneDriveLastActivityDate = oneDrive?.LastActivityDate,
+                    TeamsChatMessageCount = teamsActivity?.TeamChatMessageCount,
+                    TeamsPrivateChatMessageCount = teamsActivity?.PrivateChatMessageCount,
+                    TeamsCallCount = teamsActivity?.CallCount,
+                    TeamsMeetingCount = teamsActivity?.MeetingCount,
+                    TeamsLastActivityDate = teamsActivity?.LastActivityDate,
                     LicensesJson = licensesByUserId.TryGetValue(u.Id, out var licenses) ? SerializeLicenses(licenses) : null,
                     MfaJson = mfa is null ? null : JsonSerializer.Serialize(mfa),
                     AliasesJson = ParseAliases(u.ProxyAddresses),

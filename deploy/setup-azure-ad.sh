@@ -179,7 +179,7 @@ print(json.dumps(body))
 
 set_backend_permissions() {
   log "Adding required Graph/Exchange application permissions to the backend app..."
-  local perms=(User.Read.All Reports.Read.All UserAuthenticationMethod.Read.All Policy.Read.All SecurityEvents.Read.All MailboxSettings.Read Application.Read.All RoleManagement.ReadWrite.Directory ReportSettings.ReadWrite.All)
+  local perms=(User.Read.All Reports.Read.All UserAuthenticationMethod.Read.All Policy.Read.All SecurityEvents.Read.All MailboxSettings.Read Application.Read.All RoleManagement.ReadWrite.Directory ReportSettings.ReadWrite.All Team.ReadBasic.All Channel.ReadBasic.All TeamMember.Read.All)
   local graph_ids=() role_id
   for p in "${perms[@]}"; do
     role_id="$(graph_app_role_id "$p")"

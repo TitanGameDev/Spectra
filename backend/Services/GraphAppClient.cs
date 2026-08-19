@@ -45,6 +45,32 @@ public record GraphSharePointSiteDto(
     int? ActiveFileCount,
     DateTimeOffset? LastActivityDate);
 
+// A channel within a team — MembershipType is "standard", "private", or
+// "shared" (Graph's own values, passed through as-is).
+public record GraphTeamChannelDto(string? ChannelId, string DisplayName, string? Description, string? MembershipType);
+
+// A member (or owner) of a team. Roles is Graph's own conversationMember
+// "roles" array — empty for a regular member, ["owner"] for an owner.
+public record GraphTeamMemberDto(string? DisplayName, string? Email, List<string> Roles);
+
+public record GraphTeamDto(
+    string TeamId,
+    string DisplayName,
+    string? Description,
+    string? Visibility,
+    bool? IsArchived,
+    List<GraphTeamChannelDto> Channels,
+    List<GraphTeamMemberDto> Members);
+
+// Per-user Teams activity from the Reports API — same shape/period as
+// GraphOneDriveUsageDto above.
+public record GraphTeamsActivityDto(
+    int? TeamChatMessageCount,
+    int? PrivateChatMessageCount,
+    int? CallCount,
+    int? MeetingCount,
+    DateTimeOffset? LastActivityDate);
+
 public record GraphMfaDto(bool IsMfaRegistered, bool IsMfaCapable, List<string> Methods);
 
 // The List<string> properties are declared nullable even though
@@ -137,7 +163,7 @@ public class GraphPermissionDeniedException(string message) : Exception(message)
 // against that customer's tenant — but it does mean the customer's Entra
 // admin must have granted admin consent to Spectra's app registration first
 // (see the consent-url endpoint in Program.cs).
-public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider azureAdConfig)
+public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider azureAdConfig, ILogger<GraphAppClient> logger)
 {
     // Public so callers doing many per-user calls (e.g. license details across
     // a whole tenant) can acquire the app token once instead of once per call.
@@ -360,6 +386,12 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         var rows = ParseCsv(responseBody);
         if (rows.Count == 0)
         {
+            // A 200 with a genuinely empty body is unexpected — even a tenant with
+            // zero OneDrive usage should still get a header row back — so this is
+            // worth a server-side breadcrumb even though it fails soft to the user
+            // (same reasoning as the schema-mismatch case below).
+            logger.LogWarning("OneDrive usage report for tenant {TenantId} returned an empty response body ({Length} bytes): {Snippet}",
+                tenantId, responseBody.Length, TruncateForLog(responseBody));
             return usage;
         }
 
@@ -375,7 +407,10 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         if (upnIdx < 0)
         {
             // Unexpected schema (Microsoft has changed these column sets before) —
-            // fail soft with no data rather than throw on something cosmetic.
+            // fail soft with no data rather than throw on something cosmetic, but
+            // log what we actually got so it's diagnosable from server logs.
+            logger.LogWarning("OneDrive usage report for tenant {TenantId} had an unrecognized header: {Header}",
+                tenantId, string.Join(" | ", header));
             return usage;
         }
 
@@ -427,6 +462,11 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         var rows = ParseCsv(responseBody);
         if (rows.Count == 0)
         {
+            // See the equivalent OneDrive-report branch above — a 200 with a
+            // genuinely empty body is unexpected, so this is worth a breadcrumb
+            // even though it fails soft to the user.
+            logger.LogWarning("SharePoint site usage report for tenant {TenantId} returned an empty response body ({Length} bytes): {Snippet}",
+                tenantId, responseBody.Length, TruncateForLog(responseBody));
             return sites;
         }
 
@@ -443,6 +483,10 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         var lastActivityIdx = header.IndexOf("Last Activity Date");
         if (siteUrlIdx < 0)
         {
+            // Unexpected schema — fail soft with no data, but log what we
+            // actually got so it's diagnosable from server logs.
+            logger.LogWarning("SharePoint site usage report for tenant {TenantId} had an unrecognized header: {Header}",
+                tenantId, string.Join(" | ", header));
             return sites;
         }
 
@@ -468,6 +512,182 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         }
 
         return sites;
+    }
+
+    // Teams — tenant-wide list plus per-team channels and membership roster.
+    // Needs Team.ReadBasic.All (list + basic properties), Channel.ReadBasic.All
+    // (channels), and TeamMember.Read.All (membership) — three genuinely new
+    // Graph application permissions on top of everything else this class
+    // uses, so existing customers need to re-grant consent (Settings →
+    // Customers → Grant consent) before this starts returning data. One call
+    // lists every team, then two calls per team (channels + members) — same
+    // complexity class as the per-user calls used elsewhere in this class.
+    public async Task<List<GraphTeamDto>> GetTeamsAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        var teams = new List<(string Id, string DisplayName, string? Description, string? Visibility, bool? IsArchived)>();
+        string? url = "https://graph.microsoft.com/v1.0/teams?$select=id,displayName,description,visibility,isArchived&$top=999";
+
+        while (url is not null)
+        {
+            using var doc = await GetGraphJsonAsync(url, token, "Graph /teams request", ct);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("value", out var valueArray))
+            {
+                foreach (var item in valueArray.EnumerateArray())
+                {
+                    var id = GetOptionalString(item, "id");
+                    var displayName = GetOptionalString(item, "displayName");
+                    if (id is null || displayName is null)
+                    {
+                        continue;
+                    }
+
+                    var isArchived = item.TryGetProperty("isArchived", out var archivedEl) && archivedEl.ValueKind is JsonValueKind.True or JsonValueKind.False
+                        ? archivedEl.GetBoolean()
+                        : (bool?)null;
+
+                    teams.Add((id, displayName, GetOptionalString(item, "description"), GetOptionalString(item, "visibility"), isArchived));
+                }
+            }
+            url = root.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+        }
+
+        var result = new List<GraphTeamDto>();
+        foreach (var team in teams)
+        {
+            var channels = await GetTeamChannelsAsync(team.Id, token, ct);
+            var members = await GetTeamMembersAsync(team.Id, token, ct);
+            result.Add(new GraphTeamDto(team.Id, team.DisplayName, team.Description, team.Visibility, team.IsArchived, channels, members));
+        }
+
+        return result;
+    }
+
+    private async Task<List<GraphTeamChannelDto>> GetTeamChannelsAsync(string teamId, string token, CancellationToken ct)
+    {
+        var channels = new List<GraphTeamChannelDto>();
+        string? url = $"https://graph.microsoft.com/v1.0/teams/{Uri.EscapeDataString(teamId)}/channels?$select=id,displayName,description,membershipType";
+
+        while (url is not null)
+        {
+            using var doc = await GetGraphJsonAsync(url, token, "Graph team channels request", ct);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("value", out var valueArray))
+            {
+                foreach (var item in valueArray.EnumerateArray())
+                {
+                    var displayName = GetOptionalString(item, "displayName");
+                    if (displayName is null)
+                    {
+                        continue;
+                    }
+                    channels.Add(new GraphTeamChannelDto(
+                        GetOptionalString(item, "id"),
+                        displayName,
+                        GetOptionalString(item, "description"),
+                        GetOptionalString(item, "membershipType")));
+                }
+            }
+            url = root.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+        }
+
+        return channels;
+    }
+
+    private async Task<List<GraphTeamMemberDto>> GetTeamMembersAsync(string teamId, string token, CancellationToken ct)
+    {
+        var members = new List<GraphTeamMemberDto>();
+        string? url = $"https://graph.microsoft.com/v1.0/teams/{Uri.EscapeDataString(teamId)}/members?$top=999";
+
+        while (url is not null)
+        {
+            using var doc = await GetGraphJsonAsync(url, token, "Graph team members request", ct);
+            var root = doc.RootElement;
+            if (root.TryGetProperty("value", out var valueArray))
+            {
+                foreach (var item in valueArray.EnumerateArray())
+                {
+                    members.Add(new GraphTeamMemberDto(
+                        GetOptionalString(item, "displayName"),
+                        GetOptionalString(item, "email"),
+                        GetStringArray(item, "roles")));
+                }
+            }
+            url = root.TryGetProperty("@odata.nextLink", out var next) ? next.GetString() : null;
+        }
+
+        return members;
+    }
+
+    // Same usage-report family/permission/CSV limitation as
+    // GetOneDriveUsageByUpnAsync above — see that method's comment for why
+    // CSV is the only format these actually return. Keyed by UPN, joined
+    // against CustomerUser the same way OneDrive usage is.
+    public async Task<Dictionary<string, GraphTeamsActivityDto>> GetTeamsActivityByUpnAsync(string tenantId, string token, CancellationToken ct = default)
+    {
+        var usage = new Dictionary<string, GraphTeamsActivityDto>(StringComparer.OrdinalIgnoreCase);
+        const string url = "https://graph.microsoft.com/v1.0/reports/getTeamsUserActivityUserDetail(period='D7')";
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        using var response = await httpClient.SendAsync(request, ct);
+        var responseBody = await response.Content.ReadAsStringAsync(ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            var summary = Summarize(responseBody);
+            if (response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                throw new GraphPermissionDeniedException($"Graph Teams activity report failed: {summary}");
+            }
+            throw new InvalidOperationException($"Graph Teams activity report failed: {summary}");
+        }
+
+        var rows = ParseCsv(responseBody);
+        if (rows.Count == 0)
+        {
+            // See the equivalent OneDrive-report branch above — a 200 with a
+            // genuinely empty body is unexpected, so this is worth a
+            // breadcrumb even though it fails soft to the user.
+            logger.LogWarning("Teams activity report for tenant {TenantId} returned an empty response body ({Length} bytes): {Snippet}",
+                tenantId, responseBody.Length, TruncateForLog(responseBody));
+            return usage;
+        }
+
+        var header = rows[0];
+        var upnIdx = header.IndexOf("User Principal Name");
+        var chatIdx = header.IndexOf("Team Chat Message Count");
+        var privateChatIdx = header.IndexOf("Private Chat Message Count");
+        var callIdx = header.IndexOf("Call Count");
+        var meetingIdx = header.IndexOf("Meeting Count");
+        var lastActivityIdx = header.IndexOf("Last Activity Date");
+        if (upnIdx < 0)
+        {
+            // Unexpected schema — fail soft with no data, but log what we
+            // actually got so it's diagnosable from server logs.
+            logger.LogWarning("Teams activity report for tenant {TenantId} had an unrecognized header: {Header}",
+                tenantId, string.Join(" | ", header));
+            return usage;
+        }
+
+        for (var i = 1; i < rows.Count; i++)
+        {
+            var row = rows[i];
+            if (row.Count <= upnIdx || string.IsNullOrEmpty(row[upnIdx]))
+            {
+                continue;
+            }
+
+            int? chat = chatIdx >= 0 && chatIdx < row.Count && int.TryParse(row[chatIdx], out var c) ? c : null;
+            int? privateChat = privateChatIdx >= 0 && privateChatIdx < row.Count && int.TryParse(row[privateChatIdx], out var pc) ? pc : null;
+            int? calls = callIdx >= 0 && callIdx < row.Count && int.TryParse(row[callIdx], out var cc) ? cc : null;
+            int? meetings = meetingIdx >= 0 && meetingIdx < row.Count && int.TryParse(row[meetingIdx], out var mc) ? mc : null;
+            DateTimeOffset? lastActivity = lastActivityIdx >= 0 && lastActivityIdx < row.Count && DateTimeOffset.TryParse(row[lastActivityIdx], out var la) ? la : null;
+
+            usage[row[upnIdx]] = new GraphTeamsActivityDto(chat, privateChat, calls, meetings, lastActivity);
+        }
+
+        return usage;
     }
 
     // Minimal RFC4180-ish CSV parser — handles quoted fields, embedded commas,
@@ -1149,6 +1369,12 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
 
     // Graph/AAD error bodies are verbose JSON — pull out just the message for
     // the exception text that ends up in LastSyncError.
+    // Log breadcrumbs for report bodies that failed soft (see the OneDrive/
+    // SharePoint empty-response branches) — capped so a surprise HTML error
+    // page from a proxy in front of Graph can't blow up the log line.
+    private static string TruncateForLog(string text)
+        => text.Length <= 500 ? text : text[..500] + "…";
+
     private static string Summarize(string responseBody)
     {
         try
