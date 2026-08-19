@@ -59,6 +59,13 @@ public record GraphTeamDto(
     string? Description,
     string? Visibility,
     bool? IsArchived,
+    // Every team is backed by a Microsoft 365 group, and every such group
+    // has an associated SharePoint site (the team's "Files" tab is a
+    // document library on that site) — this is that site's URL, null if it
+    // couldn't be resolved (Sites.Read.All not granted, or the group's site
+    // hasn't finished provisioning yet). Lets the UI show whether a team is
+    // linked to a SharePoint site and jump straight to it.
+    string? SharePointSiteUrl,
     List<GraphTeamChannelDto> Channels,
     List<GraphTeamMemberDto> Members);
 
@@ -557,10 +564,35 @@ public class GraphAppClient(HttpClient httpClient, IActiveAzureAdConfigProvider 
         {
             var channels = await GetTeamChannelsAsync(team.Id, token, ct);
             var members = await GetTeamMembersAsync(team.Id, token, ct);
-            result.Add(new GraphTeamDto(team.Id, team.DisplayName, team.Description, team.Visibility, team.IsArchived, channels, members));
+            var sharePointSiteUrl = await GetTeamSharePointSiteUrlAsync(team.Id, token, ct);
+            result.Add(new GraphTeamDto(team.Id, team.DisplayName, team.Description, team.Visibility, team.IsArchived, sharePointSiteUrl, channels, members));
         }
 
         return result;
+    }
+
+    // Every team is backed by a Microsoft 365 group, and every such group has
+    // an associated SharePoint site — needs Sites.Read.All, a genuinely new
+    // Graph application permission on top of the Team.ReadBasic.All/
+    // Channel.ReadBasic.All/TeamMember.Read.All the rest of GetTeamsAsync
+    // uses. Deliberately caught and nulled out per-team rather than letting
+    // a missing permission (or a group whose site hasn't finished
+    // provisioning yet) fail the whole Teams collection — this is
+    // supplementary cross-reference data, not core to the tab.
+    private async Task<string?> GetTeamSharePointSiteUrlAsync(string teamId, string token, CancellationToken ct)
+    {
+        try
+        {
+            using var doc = await GetGraphJsonAsync(
+                $"https://graph.microsoft.com/v1.0/groups/{Uri.EscapeDataString(teamId)}/sites/root?$select=webUrl",
+                token, "Graph team SharePoint site request", ct);
+            return GetOptionalString(doc.RootElement, "webUrl");
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            logger.LogWarning(ex, "Couldn't resolve SharePoint site for team {TeamId} — Sites.Read.All may not be granted yet", teamId);
+            return null;
+        }
     }
 
     private async Task<List<GraphTeamChannelDto>> GetTeamChannelsAsync(string teamId, string token, CancellationToken ct)
